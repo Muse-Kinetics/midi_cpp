@@ -1,29 +1,26 @@
-# README #
+# MIDI_CPP #
 
-This README would normally document whatever steps are necessary to get your application up and running.
+A MIDI library for Muse Kinetics and KMI products. Intended for 32bit embedded and desktop applications, this library should limit itself to the c++11 std library while maintaining a small memory footprint. 
 
-### What is this repository for? ###
+This library should remain compatible with the KMI MIDI Device Manage (KMDM) library that uses the Qt framework, but it should not use any Qt methods or libraries. 
 
-* Quick summary
-* Version
-* [Learn Markdown](https://bitbucket.org/tutorials/markdowndemo)
+### Functionality ###
 
-### How do I get set up? ###
+* SysEx Universal messagine, mainly ID requests/reply
+* Device metadata
+* KMI formatted sysex - preamble, 8<>7 bit encoding/decoding, CRC, message category / type
 
-* Summary of set up
-* Configuration
-* Dependencies
-* Database configuration
-* How to run tests
-* Deployment instructions
+### Products that use this library ###
 
-### Contribution guidelines ###
+* EM Pro EMC Control PCB
+* EM Pro SoundStation
+* EM Pro Sound Card
 
-* Writing tests
-* Code review
-* Other guidelines
+### Authors ###
 
-### Who do I talk to? ###
+* Eric Bateman - eric@musekinetics.com
 
-* Repo owner or admin
-* Other community or team contact
+### Licensing / Copyright ###
+
+(c) 2025 KMI Music, Inc.
+This is not an open source library, redistribution outside of KMI is prohibited
