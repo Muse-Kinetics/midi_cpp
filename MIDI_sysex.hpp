@@ -214,8 +214,8 @@ public:
     // --- Callback setters ---
     void setCB_rx_Context(void *ctx) { context_rx = ctx; }
     void setCB_tx_Context(void *ctx) { context_rx = ctx; }
-    void setCB_debugPrint_Context(void *ctx) { context_dp = ctx; }
 
+    void setCB_debugPrint_Context(void *ctx) { context_dp = ctx; }
     void setCB_debugPrint(DebugPrintCallback cb) { cb_debugPrint = cb; }
 
     void setCB_rx_ActiveSense(VoidCallback cb) { cb_rx_ActiveSense = cb; }

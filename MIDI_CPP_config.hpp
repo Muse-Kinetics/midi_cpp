@@ -15,18 +15,25 @@
   ----------------------------------------------------------------------------
 */
 
+// library includes
+#include "MIDI_device_metadata.hpp" // ok to update with new products
+
 // user includes
 #include "sharedEnums.h"
 #include "main.h"
-#include "EMProRiserFW.h"
+#include "EMProRiserFW.h" // riser firmware version
 #include "utils.h"
 
+
+// Product ID - change to match your product
+#define SYX_PRODUCT_ID_LSB PID_MIDI_EMPRO
+
 // SysEx ID Reply Versions
-#define SYX_ID_BL_VER1 fwImage_bootByte.app_ver[0] // Riser firmware
+#define SYX_ID_BL_VER1 fwImage_bootByte.app_ver[0] // EMProRiserFW.h
 #define SYX_ID_BL_VER2 fwImage_bootByte.app_ver[1]
 #define SYX_ID_BL_VER3 fwImage_bootByte.app_ver[2]
 
-#define SYX_ID_APP_VER1 SYS_FW_VERSION_MAJOR // STM32 app firmware 
+#define SYX_ID_APP_VER1 SYS_FW_VERSION_MAJOR // main.h
 #define SYX_ID_APP_VER2 SYS_FW_VERSION_MINOR
 #define SYX_ID_APP_VER3 SYS_FW_VERSION_PATCH
 
@@ -41,10 +48,6 @@
 // ************************************
 // Library Features and Functionality
 // ************************************
-
-// comment these two lines out if you don't want to verify product IDs when receiving KMI formatted messages (packets or dan's editor message)
-#define CHECK_PRODUCT_IDS
-#define DO_PRODUCT_ID_CHECK switch (headerStd->product) { case PID_MIDI_EMPRO: case PID_MIDI_EMPRO_RISER_BL: case PID_MIDI_EMPRO_RISER:
 
 
 #endif/* MIDI_CPP_CONFIG_H */

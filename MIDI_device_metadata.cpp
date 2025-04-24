@@ -20,7 +20,7 @@ uint8_t deviceIDraw[DEVICE_ID_REPLY_HEADER_SIZE] = {
         SX_UNV_GENERAL_INFO,            // sub_id_1
         SX_UNV_DEVID_REPLY,             // sub_id_2
         kmi_id_1, kmi_id_2, kmi_id_3,   // mfg_id
-        PID_MIDI_EMPRO, PID_MIDI_MSB,   // prod_id
+        SYX_PRODUCT_ID_LSB, PID_MIDI_MSB,   // prod_id
         kmi_family_lsb, kmi_family_msb  // family_id, kmi products do not currently use these
 };
 
