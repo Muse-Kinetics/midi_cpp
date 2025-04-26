@@ -29,7 +29,6 @@ extern "C"
 /* C++ Includes  *************************************************************************************/
 #include <cstdint>
 #include <cstring>
-#include <vector>
 #include <cstddef>
 
 #include "MIDI_CPP_config.hpp"
@@ -109,7 +108,7 @@ typedef struct
 {
 	SYSEX_UNIVERSAL_HEADER hdr;
     SYSEX_DEVICE_METADATA metadata;  
-    uint8_t app_ver[3], bl_ver[3];  
+    uint8_t bl_ver[3], app_ver[3];
 } SYSEX_DEVICE_INQUIRY_REPLY;
 
 typedef union
@@ -177,10 +176,6 @@ typedef struct
 					buf[SX_ENCODE_LEN+1];
 } CORE_SX_DECODE;
 
-typedef struct 
-{
-    uint8_t debug[45];
-} DEBUG_ARRAY;
 
 //------------------------------------------------
 //	Externs and Variables
@@ -196,135 +191,147 @@ typedef struct
 //	classes
 //------------------------------------------------
 
-class SysExMessage {
+//----------------------------------------
+// Callback types
+//----------------------------------------
 
-public:
-	SysExMessage();
-	~SysExMessage();
-
-
-    // --- Callback types ---
-    using VoidCallback = void (*)(void* ctx);
-    using SendCallback = int16_t (*)(void* ctx, uint8_t* data, uint16_t length);
-    using HostMessageCallback = void (*)(void* ctx, uint8_t msg_type, uint8_t data_val, uint16_t int_val);
-    using PacketDataCallback = void (*)(void* ctx, PACKET_PREAMBLE *preamble, uint8_t *packet_data);
-    using IDReplyCallback = void (*)(void* ctx, SYSEX_DEVICE_INQUIRY_REPLY *reply);
-    using DebugPrintCallback = void(*)(void* ctx, char *string);
-
-    // --- Callback setters ---
-    void setCB_rx_Context(void *ctx) { context_rx = ctx; }
-    void setCB_tx_Context(void *ctx) { context_rx = ctx; }
-
-    void setCB_debugPrint_Context(void *ctx) { context_dp = ctx; }
-    void setCB_debugPrint(DebugPrintCallback cb) { cb_debugPrint = cb; }
-
-    void setCB_rx_ActiveSense(VoidCallback cb) { cb_rx_ActiveSense = cb; }
-    void setCB_rx_id_request(VoidCallback cb) { cb_rx_id_request = cb; }
-    void setCB_rx_id_reply(IDReplyCallback cb) { cb_rx_id_reply = cb; }
-
-    void setCB_rx_HostMessage(HostMessageCallback cb) { cb_rx_HostMessage = cb; }
-    void setCB_rx_PacketData(PacketDataCallback cb) { cb_rx_PacketData = cb; }
-    void setCB_tx_send(SendCallback func) { cb_tx_Send = func; }
+using VoidCallback = void (*)(void* ctx);
+using SendCallback = int16_t (*)(void* ctx, uint8_t* data, uint16_t length);
+using HostMessageCallback = void (*)(void* ctx, uint8_t msg_type, uint8_t data_val, uint16_t int_val);
+using PacketDataCallback = void (*)(void* ctx, PACKET_PREAMBLE* preamble, uint8_t* packet_data);
+using IDReplyCallback = void (*)(void* ctx, SYSEX_DEVICE_INQUIRY_REPLY* reply);
+using DebugPrintCallback = void (*)(void* ctx, const char* string);
 
 
-    // --- add data to the buffer ---
-    void single(uint8_t byte);
-    void array(const uint8_t* bytes, size_t length);
+//----------------------------------------
+// TX Class
+//----------------------------------------
 
-    // --- manage the buffer ---
-    void reserve(size_t size);
-	size_t getSize() const;
-	uint8_t* getData();
-    DEBUG_ARRAY *d;
-	void clear();
-
-
-
-    //------------------------
-    // RX methods
-    //------------------------
-
-    SYX_RX_STATE rx_state;
-    bool rx_decode_active;
-    uint16_t rx_decode_count;
-    bool ignore_rx;
-
-    uint8_t preamble_index;
-    PACKET_PREAMBLE *preamble;
-
-    uint16_t packet_data_index;
-    uint8_t *packet_data;
-
-    void rx_init(void);
-    void rx_set_ignore(void);
-
-    void sx_process(uint8_t *msg, uint16_t length);
-
-
-    //------------------------
-    // TX methods
-    //------------------------
-
-
-    int16_t sendSysExIDRequest(void);
-    int16_t sendSysExIDReply(void);
+class SysExMessageTX {
+    public:
+        SysExMessageTX();
     
-    void makeSyxHeader(uint8_t targetPID);
+        void setCB_DebugPrint_Context(void* ctx) { context_dp = ctx; }
+        void setCB_DebugPrint(DebugPrintCallback cb) { cb_debugPrint = cb; }
 
-    void setFlush(SYX_FLUSH flush) { flushAfterPreamble = flush; };
-    int16_t sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t *ptr, uint16_t length);
+        void setCB_tx_Context(void* ctx) { context_tx = ctx; }
+        void setCB_send(SendCallback cb) { cb_tx_Send = cb; }
+        void setFlush(SYX_FLUSH flush) { flushAfterPreamble = flush; }
+    
+        int16_t makeSyxHeader(uint8_t targetPID);
+        int16_t sendSysExIDRequest();
+        int16_t sendSysExIDReply();
+        int16_t sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t* ptr, uint16_t length);
+    
+        uint8_t* getData() { return buffer; };
+        size_t getSize() const { return size; };
+        uint16_t getCRC() const { return crc; }
 
-    //------------------------
-    // Encode 8 bits to 7 bits
-    //------------------------
+        void clear();
+        int16_t single(uint8_t byte); // pass return code to the callback
+        int16_t array(const uint8_t* bytes, size_t length);
 
-	void init_crc(void);
-	uint16_t getCRC();
+        void init_encode();
+        void init_crc();
+        int16_t encode_char(uint8_t val);
+        int16_t encode_crc_char(uint8_t val);
+        int16_t encode_int(uint16_t val);
+        int16_t encode_crc_int(uint16_t val);
+        int16_t flush_encode();
 
-    void init_encode(void);
-	void encode_char(uint8_t val);
-    void encode_int(uint16_t val);
-    void encode_crc_int(uint16_t val);
-    void encode_crc_char(uint8_t val);
-	void flush_encode(void);
 
-	//------------------------
-    // Decode 7bits to 8 bits
-    //------------------------
-
-    void init_decode(void);
-    void decode_put(uint8_t val);
-    bool decode_get(uint8_t *val);
-
-	bool testDecodedCRC(uint16_t startIndex, uint16_t length);
-
-    void updatePointers();
-    SYSEX_UNIVERSAL_HEADER *headerUniv;
-    SYSEX_STANDARD *headerStd;
+    private:
+        uint8_t buffer[SYX_TX_BLOCK_SIZE];
+        size_t size = 0;
+        uint16_t crc = 0;
+        uint8_t midi_hi_bits = 0;
+        uint8_t midi_hi_count = 0;
+        SYX_FLUSH flushAfterPreamble = SYX_FLUSH_NO;
+    
+        void* context_tx = nullptr;
+        void* context_dp = nullptr;
+        SendCallback cb_tx_Send = nullptr;
+        DebugPrintCallback cb_debugPrint = nullptr;
     
 
-private:
-	std::vector<uint8_t> message;    // Message buffer
-	uint16_t crc;
-    uint8_t midi_hi_bits;
-    uint8_t midi_hi_count;
+   };
+    
+//----------------------------------------
+// RX Class
+//----------------------------------------
+    
+class SysExMessageRX {
+    public:
+        SysExMessageRX(SysExMessageTX* syxSend);
+    
+        void setCB_rx_Context(void* ctx) { context_rx = ctx; }
+        void setCB_DebugPrint_Context(void* ctx) { context_dp = ctx; }
 
-	CORE_SX_DECODE core_sx_decode;
+        void setCB_DebugPrint(DebugPrintCallback cb) { cb_debugPrint = cb; }
+        void setCB_rx_ActiveSense(VoidCallback cb) { cb_rx_ActiveSense = cb; }
+        void setCB_rx_IDRequest(VoidCallback cb) { cb_rx_id_request = cb; }
+        void setCB_rx_IDReply(IDReplyCallback cb) { cb_rx_id_reply = cb; }
+        void setCB_rx_HostMessage(HostMessageCallback cb) { cb_rx_HostMessage = cb; }
+        void setCB_rx_PacketData(PacketDataCallback cb) { cb_rx_PacketData = cb; }
+    
+        void setSendPtr(SysExMessageTX* syxSend) { syxSendPtr = syxSend; }
+        void rx_init();
+        void rx_set_ignore();
+        void setFlush(SYX_FLUSH flush) { flushAfterPreamble = flush; }
 
-    SYX_FLUSH flushAfterPreamble; 
+        void single(uint8_t byte);
+        void array(const uint8_t* bytes, size_t length);
 
-    void* context_rx = nullptr;
-    void* context_tx = nullptr;
-    void* context_dp = nullptr;
+        void updatePointers();
+        void sx_process(uint8_t* msg, uint16_t length);
 
-    DebugPrintCallback cb_debugPrint = nullptr;
+        SYSEX_UNIVERSAL_HEADER* headerUniv;
+        SYSEX_STANDARD* headerStd;
 
-    SendCallback cb_tx_Send = nullptr;
-    VoidCallback cb_rx_ActiveSense = nullptr;
-    VoidCallback cb_rx_id_request = nullptr;
-    IDReplyCallback cb_rx_id_reply = nullptr;
-    HostMessageCallback cb_rx_HostMessage = nullptr;
-    PacketDataCallback cb_rx_PacketData = nullptr;
-};
+        uint8_t* getData() { return buffer; };
+        size_t getSize() const { return size; };
+        uint16_t getCRC() const { return crc; }
 
+        void clear();
+        void init_crc();
+        void init_decode();
+        void decode_put(uint8_t val);
+        bool decode_get(uint8_t* val);
+        bool testDecodedCRC(uint16_t startIndex, uint16_t length);
+        SYX_RX_STATE rx_state;
+
+    private:
+        SysExMessageTX* syxSendPtr = nullptr;
+        uint8_t buffer[SYX_RX_BLOCK_SIZE];
+        size_t size = 0;
+        SYX_FLUSH flushAfterPreamble = SYX_FLUSH_NO;
+    
+        
+        bool rx_decode_active;
+        uint16_t rx_decode_count;
+        bool ignore_rx;
+    
+        CORE_SX_DECODE core_sx_decode;
+        uint16_t crc;
+    
+        uint8_t preamble_index;
+        PACKET_PREAMBLE* preamble;
+    
+        uint16_t packet_data_index;
+        uint8_t* packet_data;
+    
+        
+    
+        void* context_rx = nullptr;
+        void* context_dp = nullptr;
+    
+        VoidCallback cb_rx_ActiveSense = nullptr;
+        VoidCallback cb_rx_id_request = nullptr;
+        IDReplyCallback cb_rx_id_reply = nullptr;
+        HostMessageCallback cb_rx_HostMessage = nullptr;
+        PacketDataCallback cb_rx_PacketData = nullptr;
+        DebugPrintCallback cb_debugPrint = nullptr;
+    
+        
+    };
 #endif/* MIDI_SYSEX_H */

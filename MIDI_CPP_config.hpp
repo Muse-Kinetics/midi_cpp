@@ -43,7 +43,8 @@
 #define SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION 	ERR_TX_NO_SYX_SEND_FUNCTION 	// if no syx send function has been defined (nullptr) then return with this 
 
 // block size to limit size of vectors
-#define SYX_BLOCK_SIZE 48 
+#define SYX_TX_BLOCK_SIZE 48 
+#define SYX_RX_BLOCK_SIZE 64
 
 // ************************************
 // Library Features and Functionality

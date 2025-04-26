@@ -13,7 +13,7 @@
 
 #include "MIDI_bytestream_parser.hpp"
 
-MidiBytestreamParser::MidiBytestreamParser(SysExMessage* sysexObj)
+MidiBytestreamParser::MidiBytestreamParser(SysExMessageRX* sysexObj)
     : syx(sysexObj) 
 {
     reset();
