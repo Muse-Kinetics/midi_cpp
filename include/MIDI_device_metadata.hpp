@@ -13,6 +13,8 @@
   ----------------------------------------------------------------------------
 */
 
+#include "stdint.h"
+#include "MIDI.hpp"
 #include "MIDI_sysex.hpp"
 
 #define DEVICE_ID_REPLY_HEADER_SIZE 12
@@ -54,8 +56,5 @@ enum SYX_EMPRO_MSG_SYSTEM
 };
 
 extern uint8_t deviceIDraw[DEVICE_ID_REPLY_HEADER_SIZE];
-
-
-
 
 #endif/* MIDI_DEVICE_METADATA_H */

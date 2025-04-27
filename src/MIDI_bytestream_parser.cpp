@@ -48,13 +48,13 @@ bool MidiBytestreamParser::parse(uint8_t byte)
 		{
 			state = State::WAIT_STATUS;
 			if (syx != nullptr)
-				syx->single(byte);
+				syx->sx_process(&byte, 1);
 			return false;
 		}
 		else if (!(byte & 0x80)) // more sysex
 		{
 			if (syx != nullptr)
-				syx->single(byte);
+                syx->sx_process(&byte, 1);
 			return false;
 		}
         else // any other status byte during sysex is an error, break sysex transmission and process below
@@ -74,7 +74,7 @@ bool MidiBytestreamParser::parse(uint8_t byte)
             state = State::SYSEX;
 
             if (syx != nullptr)
-                syx->single(byte);
+                syx->sx_process(&byte, 1);
 
             return false;
         }

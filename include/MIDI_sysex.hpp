@@ -18,7 +18,7 @@
 extern "C" 
 {
 #endif
-    #include "utils.h"
+    //#include "utils.h"
 #ifdef __cplusplus
 }
 #endif
@@ -41,6 +41,8 @@ extern "C"
 //------------------------------------------------
 //	defines, constants, and enums
 //------------------------------------------------
+
+#define SWAP_BYTES(x) (((x & 0xFF) << 8) | ((x & 0xFF00) >> 8))
 
 #define SYX_MSG_SIZE 100
 
@@ -262,13 +264,13 @@ class SysExMessageTX {
     
 class SysExMessageRX {
     public:
-        SysExMessageRX(SysExMessageTX* syxSend);
+        SysExMessageRX(SysExMessageTX* syxSend = nullptr);
     
         void setCB_rx_Context(void* ctx) { context_rx = ctx; }
         void setCB_DebugPrint_Context(void* ctx) { context_dp = ctx; }
 
         void setCB_DebugPrint(DebugPrintCallback cb) { cb_debugPrint = cb; }
-        void setCB_rx_ActiveSense(VoidCallback cb) { cb_rx_ActiveSense = cb; }
+        void setCB_rx_ActiveSense(VoidCallback cb) { cb_rx_ActiveSense = cb; } // EMC requires we check this in the sysex handler, the bytestream object will take priority if implemented
         void setCB_rx_IDRequest(VoidCallback cb) { cb_rx_id_request = cb; }
         void setCB_rx_IDReply(IDReplyCallback cb) { cb_rx_id_reply = cb; }
         void setCB_rx_HostMessage(HostMessageCallback cb) { cb_rx_HostMessage = cb; }

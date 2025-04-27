@@ -48,3 +48,27 @@ Thumbs.db
 *.mov
 *.wmv
 
+# Ignore build artifacts
+/build/
+/bin/
+/CMakeFiles/
+/CMakeCache.txt
+/Makefile
+/*.cmake
+/*.o
+/*.obj
+/*.exe
+/*.out
+
+
+# Ignore user/editor config files
+/.vscode/
+/.idea/
+/*.user
+*.DS_Store
+
+# Ignore generated files
+compile_commands.json
+
+# Ignore logs
+*.log

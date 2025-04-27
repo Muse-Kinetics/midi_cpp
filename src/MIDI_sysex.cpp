@@ -15,6 +15,7 @@
 
 
 #include "MIDI_sysex.hpp"
+#include "utils_crc.h"
 #include <cstring>
 #include <cstdio>
 
@@ -39,6 +40,9 @@ int16_t SysExMessageTX::single(uint8_t byte)
 
 	if (size >= sizeof(buffer) || byte == MIDI_SX_STOP)
 	{
+		if (cb_debugPrint)
+			cb_debugPrint(context_dp, "Emptying buffer");
+
 		if (cb_tx_Send)
 			returnCode = cb_tx_Send(context_tx, &buffer[0], size); // send the buffer
 		clear(); // reset the buffer
@@ -52,7 +56,7 @@ int16_t SysExMessageTX::array(const uint8_t* bytes, size_t length)
 
     for (size_t i = 0; i < length; ++i)
 	{
-        single(bytes[i]);
+        returnCode = single(bytes[i]);
 	}
 	
 	return returnCode;
@@ -147,8 +151,7 @@ int16_t SysExMessageTX::sendSysExIDRequest()
 	clear();
     uint8_t idReq[] = {MIDI_SX_START, SX_UNIVERSAL_NON_REALTIME, SX_ADDRESS, SX_UNV_GENERAL_INFO, SX_UNV_DEVID_REQ, MIDI_SX_STOP};
     array(idReq, sizeof(idReq));
-	if (cb_tx_Send)
-		return cb_tx_Send(context_tx, &buffer[0], size); 
+	// MIDI_SX_STOP triggers send, so we don't need to call send here
 
 	return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION;
 }
@@ -166,10 +169,7 @@ int16_t SysExMessageTX::sendSysExIDReply()
     array(deviceIDraw, sizeof(deviceIDraw)); 
     array(versionBL, sizeof(versionBL));
     array(versionAPP, sizeof(versionAPP));
-    single(MIDI_SX_STOP);
-
-    if (cb_tx_Send)
-		return cb_tx_Send(context_tx, &buffer[0], size); 
+    single(MIDI_SX_STOP); // MIDI_SX_STOP triggers send, so we don't need to call send here
 		
 	return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION;
 }
@@ -215,19 +215,12 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
         if (returnCode != SYX_SEND_RETURN_CODE_OK)
             return returnCode;
 
-        uint8_t blockCount = 0;
         while(length--)
         {
-            encode_crc_char(*ptr++);
-            
-            if (++blockCount >= SYX_TX_BLOCK_SIZE)
-            {
-                returnCode = cb_tx_Send(context_tx, &buffer[0], size); // load the block into appropriate tx buffer
-                blockCount = 0;
-                clear();
-                if (returnCode != SYX_SEND_RETURN_CODE_OK)
-                    return returnCode;
-            }
+            returnCode = encode_crc_char(*ptr++); 
+
+			if (returnCode != SYX_SEND_RETURN_CODE_OK)
+				return returnCode;
         }
         
         encode_crc_int(0);  // length of the next packet - if 0 then this is the last packet, if something
@@ -238,9 +231,8 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
 
     // end 7/8bit encoding
     flush_encode();
-    single(MIDI_SX_STOP);
+    single(MIDI_SX_STOP); // MIDI_SX_STOP triggers send, so we don't need to call send here
 
-    returnCode = cb_tx_Send(context_tx, &buffer[0], size); // load the rest of the message into the tx buffer
 	clear();
 	return returnCode;
 }
@@ -250,7 +242,7 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
 // RX Implementation
 //----------------------------------------
 
-SysExMessageRX::SysExMessageRX(SysExMessageTX* syxSend = nullptr)
+SysExMessageRX::SysExMessageRX(SysExMessageTX* syxSend)
 	: syxSendPtr(syxSend)
 {
 	clear();
@@ -410,8 +402,6 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					int_val |= (packet_data[msgIndex++] & 0x7F) << 14; // bits 14-20 (7 bits)
 					int_val |= (packet_data[msgIndex++] & 0x7F) << 7;  // bits 7-13 (7 bits)
 					int_val |= (packet_data[msgIndex++] & 0x7F); // bits 0-6 (7 bits)
-
-					UNUSED(length); // for now don't worry about this, but if the need arises we have it
 					
 					if (cb_rx_HostMessage)
 						cb_rx_HostMessage(context_rx, msg_type, data_val, int_val);
@@ -431,6 +421,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					else
 					{
 						//printf("[%s] CRC pass\n", name);
+						preamble->length -= 4; // remove the crc and length bytes from the length
 						if (cb_rx_PacketData)
 							cb_rx_PacketData(context_rx, preamble, packet_data); // child classes (riser, computer, soundcard etc) determine how this is handled
 					}
@@ -577,7 +568,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 
 					while (decode_get(&sx_char))  // this will return true 7 times when 8 bytes have been received
 					{
-						printf("%d:%x, ", rx_decode_count, sx_char);
+						//printf("%d:%x, ", rx_decode_count, sx_char);
 						single(sx_char); // add decoded byte to message array/vector
 
 						if (rx_decode_count == sizeof(PACKET_PREAMBLE))
@@ -627,7 +618,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 
 					while (decode_get(&sx_char))  // this will return true 7 times when 8 bytes have been received
 					{
-						printf("%x ", sx_char);
+						//printf("%x ", sx_char);
 						single(sx_char); // add decoded byte to message array/vector
 					}
 					break; // end CORE_SX_PACKET_DATA

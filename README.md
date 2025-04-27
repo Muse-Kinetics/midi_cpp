@@ -6,6 +6,7 @@ This library should remain compatible with the KMI MIDI Device Manage (KMDM) lib
 
 ### Functionality ###
 
+* Bytestream parsing and formatting
 * SysEx Universal messagine, mainly ID requests/reply
 * Device metadata
 * KMI formatted sysex - preamble, 8<>7 bit encoding/decoding, CRC, message category / type
