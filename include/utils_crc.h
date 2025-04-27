@@ -24,6 +24,9 @@ static inline void crc_init(uint16_t *this_crc)
     *this_crc = 0xFFFF;
 }
 
+// WARNING: CRC checks are dependent on system architecture (8bit, 32bit, little/big endian). 
+// Legacy KMI devices that crc was implemented under were 8bit little-endian, mismatches in
+// architecture can cause issues during the calculation below, not just in the final result.
 static inline void crc_byte(uint16_t *this_crc, uint8_t val)
 {
 	uint16_t temp;

@@ -175,12 +175,13 @@ int16_t SysExMessageTX::sendSysExIDReply()
 }
 
 
-
+// This is the PacketData format, used by most KMI/MK products.
 // Note: certain product firmware (like Dan's Riser Bootloader) requires that we flush the syx encoding after the preamble 
-// and before the data payload. This option has to be handled by the application
+// and before the data payload. This option has to be handled by the application.
+// Note2: Products like SoftStep and 12Step would send multiple presets (packets) with a single preamble, see "LENGTH OF NEXT PACKET" below.
+// Multiple packets are not currently implemented in this library.
 int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t* ptr, uint16_t length)
 {  
-
 	if (!cb_tx_Send)
     	return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION; 
 
@@ -210,7 +211,7 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
             flush_encode(); // EM Pro Riser bootloader expects us to flush the encoding here, most other applications do not
         }
 
-        returnCode = cb_tx_Send(context_tx, &buffer[0], size); // load the preamble into appropriate tx buffer
+        returnCode = cb_tx_Send(context_tx, &buffer[0], size); // transmit the preamble before encoding data
         clear();
         if (returnCode != SYX_SEND_RETURN_CODE_OK)
             return returnCode;
@@ -223,8 +224,9 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
 				return returnCode;
         }
         
-        encode_crc_int(0);  // length of the next packet - if 0 then this is the last packet, if something
-                                // other than zero, we can send additional blocks of data, ie multiple presets
+		// LENGTH OF NEXT PACKET
+        encode_crc_int(0);  // if 0 then this is the last packet, if something other than zero, we can
+                            // send additional blocks of data, ie multiple presets
 
         encode_int(crc); // this is the crc of the payload
     }

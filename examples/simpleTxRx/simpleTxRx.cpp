@@ -106,34 +106,34 @@ void SimpleTxRx::sendExampleMessages()
 {
     std::vector<unsigned char> message;
 
-    std::cout << "Send IDReq" << std::endl;
+    std::cout << std::endl << "Send IDReq" << std::endl;
     // 1. Send SysEx ID Request
     syxTx.sendSysExIDRequest();
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-    std::cout << "Send IDReply" << std::endl;
+    std::cout << std::endl << "Send IDReply" << std::endl;
     // 2. Send SysEx ID Reply
     syxTx.sendSysExIDReply();
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     // 3. Send dummy PacketData message
-    std::cout << "Send PacketData" << std::endl;
+    std::cout << std::endl << "Send PacketData, preamble and then payload" << std::endl;
     uint8_t dummyData[20];
     for (int i = 0; i < 20; ++i)
         dummyData[i] = 200+i; // show off 8bit data
 
-    syxTx.sendSyxFormattedMessage(0x01, 0xAA, 0xBB, dummyData, sizeof(dummyData));
+    syxTx.sendSyxFormattedMessage(SYX_PRODUCT_ID_LSB, MSG_CAT_SYSTEM, MSG_SYS_MIDI_PRINT, dummyData, sizeof(dummyData));
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     // 4. Send ActiveSense message
-    std::cout << "Send ActiveSense" << std::endl;
+    std::cout << std::endl << "Send ActiveSense" << std::endl;
     message.clear();
     message.push_back(MIDI_RT_ACTIVE_SENSE); 
     midiOut->sendMessage(&message); 
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     // 5. Send Note On message
-    std::cout << "Send NoteOn" << std::endl;
+    std::cout << std::endl << "Send NoteOn" << std::endl;
     message.clear();
     message = {MIDI_NOTE_ON, 60, 127}; // Note On message for middle C
     midiOut->sendMessage(&message); 

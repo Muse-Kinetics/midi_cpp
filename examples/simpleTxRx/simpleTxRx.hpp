@@ -23,6 +23,35 @@
 #include <iostream>
 #include <thread>
 
+// Demonstration enums for a theoretical sysex packetdata implementation
+// message category/types stored in the sysex preamble
+enum SYX_MSG_CATEGORY
+{
+    MSG_CAT_NULL,
+    MSG_CAT_SYSTEM,         
+    MSG_CAT_INSTRUMENT,    
+    NUM_MSG_CATEGORIES
+};
+
+enum SYX_MSG_SYSTEM
+{
+    MSG_SYS_NULL,
+    MSG_SYS_EVENT,              // has data payload that matches an event_t struct
+    MSG_SYS_LOAD_BOOTLOADER,     
+    MSG_SYS_MIDI_PRINT,
+    NUM_SYSTEM_MSG_TYPES
+};
+
+enum SYX_MSG_INSTRUMENT
+{
+    MSG_INST_NULL,
+    MSG_INST_INSTRUMENT_NAME_REQ,            
+    MSG_INST_INSTRUMENT_NAME_REPLY,    
+    NUM_INSTRUMENT_MSG_TYPES
+};
+
+
+// SysEx TX/RX class for sending and receiving MIDI messages
 class SimpleTxRx
 {
 public:
