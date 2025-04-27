@@ -401,6 +401,8 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					uint8_t data_val = packet_data[msgIndex++]; // only 7 bits
 					uint16_t int_val = 0;                       // 16 bits
 
+					(void)length; // silence unused variable warning
+
 					int_val |= (packet_data[msgIndex++] & 0x7F) << 14; // bits 14-20 (7 bits)
 					int_val |= (packet_data[msgIndex++] & 0x7F) << 7;  // bits 7-13 (7 bits)
 					int_val |= (packet_data[msgIndex++] & 0x7F); // bits 0-6 (7 bits)
