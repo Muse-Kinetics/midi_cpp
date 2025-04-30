@@ -12,8 +12,7 @@
 
   ----------------------------------------------------------------------------
 */
-
-enum MIDI_CHANNELS
+enum
 {
 	MIDI_CH_1,		// 0
 	MIDI_CH_2,
@@ -32,7 +31,7 @@ enum MIDI_CHANNELS
 	MIDI_CH_15,
 	MIDI_CH_16,
 	NUM_MIDI_CHANNELS // 16
-};
+} MIDI_CHANNEL;
 
 // use these when assigning to a 4 bit "status" nibble
 #define MIDI_STATUS_NOTE_OFF          0x08
@@ -53,6 +52,7 @@ enum MIDI_CHANNELS
 #define	MIDI_PITCH_BEND			0xE0
 #define MIDI_SYS_COMMON			0xF0 // alias for code readability
 
+#define MIDI_SYSTEM				0xF0
 #define	MIDI_SX_START			0xF0
 #define	MIDI_MTC				0xF1
 #define	MIDI_SONG_POSITION		0xF2

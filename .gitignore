@@ -72,3 +72,6 @@ compile_commands.json
 
 # Ignore logs
 *.log
+
+#ignore library config file
+/include/MIDI_CPP_config.hpp
