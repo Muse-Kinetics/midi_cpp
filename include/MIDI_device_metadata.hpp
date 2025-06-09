@@ -31,12 +31,13 @@
 
 #define PID_MIDI_MSB            0x00 
 
-#define PID_MIDI_EM1            0x27
-#define PID_MIDI_EMPRO_RISER_BL 0x2B // 43
-#define PID_MIDI_EMPRO_RISER	0x2C // 44
-#define PID_USB_EMPRO_DEV		0x2D // not implemented in MIDI comms
-#define PID_MIDI_EMPRO			0x2E // 46
-#define PID_MIDI_EMPRO_SAMPLER	0x2F // 47
+#define PID_MIDI_EM1				0x27
+#define PID_MIDI_EMPRO_RISER_BL		0x2B // 43
+#define PID_MIDI_EMPRO_RISER		0x2C // 44
+#define PID_USB_EMPRO_DEV			0x2D // not implemented in MIDI comms
+#define PID_MIDI_EMPRO				0x2E // 46
+#define PID_MIDI_EMPRO_SAMPLER		0x2F // 47
+#define PID_MIDI_EPERC				0x32 // 50
 
 #define SX_ADDRESS				0x00 // the sysex address/id/channel of this device
 
