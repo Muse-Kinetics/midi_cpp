@@ -30,6 +30,7 @@ SysExMessageTX::SysExMessageTX()
 
 void SysExMessageTX::clear()
 {
+	memset(buffer, 0, sizeof(buffer)); // clear the buffer
     size = 0;
 }
 
