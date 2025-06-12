@@ -418,7 +418,8 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 				{
 					//printf("\n"); // we just printed the packet data so add a line break
 					//printf("[%s] ...PACKET_DATA\n", name);
-					if (testDecodedCRC(packet_data_index, preamble->length - 2) == false) // verify the CRC of the data, don't crc the crc (-2)
+					if (preamble->length > 4 && // 4 = length and crc only, no data
+						 testDecodedCRC(packet_data_index, preamble->length - 2) == false) // verify the CRC of the data, don't crc the crc (-2)
 					{
 						if (cb_debugPrint)
 							cb_debugPrint(context_dp, "CRC FAIL!");
