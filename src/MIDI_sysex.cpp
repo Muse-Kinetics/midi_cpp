@@ -212,8 +212,8 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
             flush_encode(); // EM Pro Riser bootloader expects us to flush the encoding here, most other applications do not
         }
 
-        returnCode = cb_tx_Send(context_tx, &buffer[0], size); // transmit the preamble before encoding data
-        clear();
+        //returnCode = cb_tx_Send(context_tx, &buffer[0], size); // transmit the preamble before encoding data
+        //clear();
         if (returnCode != SYX_SEND_RETURN_CODE_OK)
             return returnCode;
 
