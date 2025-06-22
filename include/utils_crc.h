@@ -32,6 +32,9 @@ static inline void crc_byte(uint16_t *this_crc, uint8_t val)
 	uint16_t temp;
 	uint16_t quick;
     uint16_t crc_val = *this_crc;
+
+	//printf("crc input: %d val: %d ", *this_crc, val);
+
 							    			    //if we represent crc at start as 0xHHLL
 	temp = ((crc_val >> 8) ^ val) & 0xFFFF;     //xor 8 bit val with upper byte of crc (0x00HH ^ val) = 0x00XX
 
@@ -49,6 +52,8 @@ static inline void crc_byte(uint16_t *this_crc, uint8_t val)
 	crc_val = (crc_val ^ quick) & 0xFFFF; 		//hash
 
 	*this_crc = crc_val;
+
+	//printf("output %d\n", crc_val);
 }
 
 static inline void crc_append_buf(uint16_t *this_crc, const uint8_t *ptr, uint16_t length)

@@ -214,8 +214,8 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
 
         //returnCode = cb_tx_Send(context_tx, &buffer[0], size); // transmit the preamble before encoding data
         //clear();
-        if (returnCode != SYX_SEND_RETURN_CODE_OK)
-            return returnCode;
+        // if (returnCode != SYX_SEND_RETURN_CODE_OK)
+        //     return returnCode;
 
         while(length--)
         {
