@@ -12,7 +12,7 @@
 
   ----------------------------------------------------------------------------
 */
-enum
+[[maybe_unused]] enum
 {
 	MIDI_CH_1,		// 0
 	MIDI_CH_2,
@@ -95,6 +95,7 @@ enum
 #define MIDI_CC_BANK_SELECT_MSB 0
 #define MIDI_CC_MODULATION_WHEEL 1
 #define MIDI_CC_BREATH_CONTROL 2
+#define MIDI_CC_3 3
 #define MIDI_CC_FOOT_CONTROLLER 4
 #define MIDI_CC_PORTAMENTO_TIME 5
 #define MIDI_CC_DATA_MSB 6
