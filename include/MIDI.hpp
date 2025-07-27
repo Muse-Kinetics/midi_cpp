@@ -12,7 +12,7 @@
 
   ----------------------------------------------------------------------------
 */
-[[maybe_unused]] enum
+enum
 {
 	MIDI_CH_1,		// 0
 	MIDI_CH_2,
@@ -31,7 +31,7 @@
 	MIDI_CH_15,
 	MIDI_CH_16,
 	NUM_MIDI_CHANNELS // 16
-} MIDI_CHANNEL;
+};
 
 // use these when assigning to a 4 bit "status" nibble
 #define MIDI_STATUS_NOTE_OFF          0x08

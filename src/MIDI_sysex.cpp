@@ -41,8 +41,8 @@ int16_t SysExMessageTX::single(uint8_t byte)
 
 	if (size >= sizeof(buffer) || byte == MIDI_SX_STOP)
 	{
-		if (cb_debugPrint)
-			cb_debugPrint(context_dp, "Emptying buffer");
+		// if (cb_debugPrint)
+		// 	cb_debugPrint(context_dp, "Emptying buffer");
 
 		if (cb_tx_Send)
 			returnCode = cb_tx_Send(context_tx, &buffer[0], size); // send the buffer
