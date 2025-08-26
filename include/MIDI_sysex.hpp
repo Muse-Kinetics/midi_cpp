@@ -44,8 +44,6 @@ extern "C"
 
 #define SWAP_BYTES(x) (((x & 0xFF) << 8) | ((x & 0xFF00) >> 8))
 
-#define SYX_MSG_SIZE 100
-
 #define SX_UNIVERSAL_NON_REALTIME	0x7E // see "Universal System Exclusive Messages.pdf"
 #define SX_UNIVERSAL_REALTIME	    0x7F // see "Universal System Exclusive Messages.pdf"
 

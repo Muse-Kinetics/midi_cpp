@@ -456,8 +456,10 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 		{
 			uint16_t core_sx_count = getSize();
 			// make sure we aren't overloading our buffers/memory
-			if (core_sx_count > SYX_MSG_SIZE || ignore_rx == true)
+			if (core_sx_count > SYX_RX_BLOCK_SIZE || ignore_rx == true)
 			{
+				if (cb_debugPrint)
+					cb_debugPrint(context_dp, "ERROR: SysEx RX buffer overflow!");
 				rx_set_ignore();
 				return;
 			}
