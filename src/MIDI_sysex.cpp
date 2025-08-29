@@ -433,6 +433,18 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					}
 					break; // end CORE_SX_PACKET_DATA
 				}
+				case CORE_SX_RAW_DATA: // raw = unencoded
+				{
+					PACKET_PREAMBLE rawPreamble; // don't point to our buffer because our incoming message doesn't contain size or crc elements
+					uint8_t thisIndex = sizeof(SYSEX_STANDARD); 
+					rawPreamble.category = buffer[thisIndex++];
+					rawPreamble.type = buffer[thisIndex++];
+					rawPreamble.length = size - thisIndex;
+					packet_data = &buffer[thisIndex];
+					if (cb_rx_PacketData)
+						cb_rx_PacketData(context_rx, &rawPreamble, packet_data); // re-use this callback as the categories/types still apply
+					break;
+				}
 				case CORE_SX_IGNORE:
 					break;
 				default:
@@ -529,6 +541,11 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 									packet_data_index = size;
 									packet_data = &buffer[packet_data_index];
 									rx_state = CORE_SX_HOST_DATA;
+								}
+								else if (headerStd->format == SYX_FORMAT_NO_ENCODING)
+								{
+									rx_decode_active = false;
+									rx_state = CORE_SX_RAW_DATA;
 								}
 								else
 								{
@@ -630,6 +647,11 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 						single(sx_char); // add decoded byte to message array/vector
 					}
 					break; // end CORE_SX_PACKET_DATA
+				}
+				case CORE_SX_RAW_DATA: // unencoded 7bit data
+				{
+					single(sx_char); // process unencoded data when we get to end of sysex
+					break; // end CORE_SX_RAW_DATA
 				}
 				case CORE_SX_IGNORE:
 					break; // end CORE_SX_IGNORE
