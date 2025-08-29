@@ -164,4 +164,48 @@ enum
 #define MIDI_CC_POLY_MODE_OFF 126
 #define MIDI_CC_POLY_MODE_ON 127
 
+
+
+static uint8_t expectedBytesForStatus(uint8_t status)
+{
+	switch (status & 0xF0)
+	{
+		case MIDI_NOTE_OFF:
+		case MIDI_NOTE_ON:
+		case MIDI_NOTE_AFTERTOUCH:
+		case MIDI_CONTROL_CHANGE:
+		case MIDI_PITCH_BEND:
+			return 3; // status + 2 data bytes
+
+		case MIDI_PROG_CHANGE:
+		case MIDI_CHANNEL_PRESSURE:
+			return 2; // status + 1 data byte
+
+		case MIDI_SYSTEM:
+			switch (status)
+			{
+				case MIDI_SX_START: // SysEx start
+					return 0; // variable length, terminated by F7
+				case MIDI_MTC: // MIDI Time Code Quarter Frame
+				case MIDI_SONG_SELECT:
+					return 2; // status + 1 data byte
+				case MIDI_SONG_POSITION:
+					return 3; // status + 2 data bytes
+				case MIDI_TUNE_REQUEST:
+				case MIDI_SX_STOP:
+				case MIDI_RT_CLOCK:
+				case MIDI_RT_START:
+				case MIDI_RT_CONTINUE:
+				case MIDI_RT_STOP:
+				case MIDI_RT_ACTIVE_SENSE:
+				case MIDI_RT_RESET:
+					return 1; // just the status byte
+				default:
+					return 1; // unknown system message, assume no data bytes
+			}
+		default:
+			return 1; // unknown message, assume no data bytes
+	}
+}
+
 #endif //MIDI_INCLUDED
