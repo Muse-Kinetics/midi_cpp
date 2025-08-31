@@ -82,33 +82,7 @@ bool MidiBytestreamParser::parse(uint8_t byte)
         state = State::READ_DATA;
         runningStatus = byte;
 
-        switch (byte) {
-            case MIDI_MTC:
-            case MIDI_SONG_SELECT:
-                expectedLength = 2;
-                break;
-            case MIDI_SONG_POSITION:
-                expectedLength = 3;
-                break;
-            default:
-                switch (byte & 0xF0) {
-                    case MIDI_PROG_CHANGE:
-                    case MIDI_CHANNEL_PRESSURE:
-                        expectedLength = 2;
-                        break;
-                    case MIDI_NOTE_OFF:
-                    case MIDI_NOTE_ON:
-                    case MIDI_NOTE_AFTERTOUCH:
-                    case MIDI_CONTROL_CHANGE:
-                    case MIDI_PITCH_BEND:
-                        expectedLength = 3;
-                        break;
-                    default:
-                        expectedLength = 3; // shouldn't ever go here
-                        break;
-                }
-                break;
-        }
+        expectedLength = expectedBytesForStatus(byte);
 
         return false;
     }
@@ -121,22 +95,7 @@ bool MidiBytestreamParser::parse(uint8_t byte)
             msgIndex = 1;
             state = State::READ_DATA;
 
-            switch (runningStatus & 0xF0) {
-                case MIDI_PROG_CHANGE:
-                case MIDI_CHANNEL_PRESSURE:
-                    expectedLength = 2;
-                    break;
-                case MIDI_NOTE_OFF:
-                case MIDI_NOTE_ON:
-                case MIDI_NOTE_AFTERTOUCH:
-                case MIDI_CONTROL_CHANGE:
-                case MIDI_PITCH_BEND:
-                    expectedLength = 3;
-                    break;
-                default:
-                    expectedLength = 3;
-                    break;
-            }
+            expectedLength = expectedBytesForStatus(runningStatus);
         }
 
         if (msgIndex < sizeof(msg))
