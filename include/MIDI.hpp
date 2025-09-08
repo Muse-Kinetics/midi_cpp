@@ -166,7 +166,7 @@ enum
 
 
 
-static uint8_t expectedBytesForStatus(uint8_t status)
+inline static uint8_t expectedBytesForStatus(uint8_t status)
 {
 	switch (status & 0xF0)
 	{
