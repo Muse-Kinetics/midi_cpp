@@ -19,7 +19,7 @@ MidiBytestreamParser::MidiBytestreamParser(SysExMessageRX* sysexObj)
     reset();
 }
 
-bool MidiBytestreamParser::parse(uint8_t byte) 
+int MidiBytestreamParser::parse(uint8_t byte) 
 {
 	// single byte realtime messages can interrupt sysex or even channel messages. Handle them first and do not change state or running status.
 	switch (byte) 
@@ -28,7 +28,7 @@ bool MidiBytestreamParser::parse(uint8_t byte)
 		case MIDI_RT_UNDEF2:
 		case MIDI_RT_UNDEF3:
 		case MIDI_RT_UNDEF4:
-			return false;
+			return 0;
 		case MIDI_TUNE_REQUEST:
 		case MIDI_RT_CLOCK:
 		case MIDI_RT_START:
@@ -38,7 +38,7 @@ bool MidiBytestreamParser::parse(uint8_t byte)
 		case MIDI_RT_RESET:
 			msg[0] = byte;
 			msgLen = 1;
-			return true;
+			return msgLen;
 	}
 
 	// handle sysex
@@ -49,13 +49,13 @@ bool MidiBytestreamParser::parse(uint8_t byte)
 			state = State::WAIT_STATUS;
 			if (syx != nullptr)
 				syx->sx_process(&byte, 1);
-			return false;
+			return 0;
 		}
 		else if (!(byte & 0x80)) // more sysex
 		{
 			if (syx != nullptr)
                 syx->sx_process(&byte, 1);
-			return false;
+			return 0;
 		}
         else // any other status byte during sysex is an error, break sysex transmission and process below
         {
@@ -76,7 +76,7 @@ bool MidiBytestreamParser::parse(uint8_t byte)
             if (syx != nullptr)
                 syx->sx_process(&byte, 1);
 
-            return false;
+            return 0;
         }
 
         state = State::READ_DATA;
@@ -84,7 +84,7 @@ bool MidiBytestreamParser::parse(uint8_t byte)
 
         expectedLength = expectedBytesForStatus(byte);
 
-        return false;
+        return 0;
     }
 
     // Support running status: treat incoming data as continuation of previous channel message
@@ -104,11 +104,11 @@ bool MidiBytestreamParser::parse(uint8_t byte)
         if (msgIndex >= expectedLength) {
             msgLen = expectedLength;
             msgIndex = 1;
-            return true;
+            return msgLen;
         }
     }
 
-    return false;
+    return 0;
 }
 
 void MidiBytestreamParser::reset()
