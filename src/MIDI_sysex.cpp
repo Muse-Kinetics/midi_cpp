@@ -421,8 +421,13 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					if (preamble->length > 4 && // 4 = length and crc only, no data
 						 testDecodedCRC(packet_data_index, preamble->length - 2) == false) // verify the CRC of the data, don't crc the crc (-2)
 					{
+						uint8_t category = preamble->category;
+						uint8_t type = preamble->type;
+						uint16_t length = preamble->length;
+						char errMsg[80]; // Sufficient for error message with some safety margin
+						snprintf(errMsg, sizeof(errMsg), "SYX DATA CRC FAIL - cat: %d, type: %d, len: %d", category, type, length);
 						if (cb_debugPrint)
-							cb_debugPrint(context_dp, "CRC FAIL!");
+							cb_debugPrint(context_dp, errMsg);
 					}
 					else
 					{
@@ -471,7 +476,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 			if (core_sx_count > SYX_RX_BLOCK_SIZE || ignore_rx == true)
 			{
 				if (cb_debugPrint)
-					cb_debugPrint(context_dp, "ERROR: SysEx RX buffer overflow!");
+					cb_debugPrint(context_dp, "ERR: SYX RX buffer overflow!");
 				rx_set_ignore();
 				return;
 			}
@@ -550,7 +555,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 								else
 								{
 									if (cb_debugPrint)
-										cb_debugPrint(context_dp, "SysEx format unrecognized");
+										cb_debugPrint(context_dp, "SYX FORMAT INVALID");
 								}
 								break;
 							}
@@ -621,8 +626,13 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 							}
 							else
 							{
+								uint8_t category = preamble->category;
+								uint8_t type = preamble->type;
+								uint16_t length = preamble->length;
+								char errMsg[80]; // Sufficient for error message with some safety margin
+								snprintf(errMsg, sizeof(errMsg), "SYX PREAMBLE CRC FAIL - cat: %d, type: %d, len: %d", category, type, length);
 								if (cb_debugPrint)
-									cb_debugPrint(context_dp, "CRC FAIL!");
+									cb_debugPrint(context_dp, errMsg);
 
 								rx_set_ignore();
 							}
@@ -630,7 +640,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 						else if (rx_decode_count > sizeof(PACKET_PREAMBLE))
 						{
 							if (cb_debugPrint)
-								cb_debugPrint(context_dp, "PACKET_PREAMBLE FAIL!");
+								cb_debugPrint(context_dp, "SYX PREAMBLE SIZE MISMATCH");
 
 							rx_set_ignore();
 						}
