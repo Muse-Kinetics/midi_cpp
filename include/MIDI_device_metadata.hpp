@@ -43,20 +43,6 @@
 #define SX_ADDRESS				0x00 // the sysex address/id/channel of this device
 
 
-enum SYX_EMPRO_MSG_CATEGORY
-{
-    MSG_EMPRO_CAT_NULL,
-    MSG_EMPRO_CAT_SYSTEM,         // 0x00 = direct access to EM PRO (stm32) event system
-    NUM_EMPRO_MSG_CATEGORIES
-};
-
-enum SYX_EMPRO_MSG_SYSTEM
-{
-    MSG_EMPRO_SYS_NULL,
-    MSG_EMPRO_SYS_EVENT,   // has data payload that matches the event_t struct, which means this can handle most requests/messages from the host (payloads need separate messages)
-    NUM_EMPRO_SYSTEM_MSG_TYPES
-};
-
 extern uint8_t deviceIDraw[DEVICE_ID_REPLY_HEADER_SIZE];
 
 #endif/* MIDI_DEVICE_METADATA_H */
