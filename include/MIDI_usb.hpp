@@ -69,7 +69,7 @@ typedef struct {
         unsigned char statusByte; // MIDI status byte = status | channel
         struct {
             unsigned char channel : 4;
-            unsigned char status : 4; // status opcode without channel info (ie 8 for channel)
+            unsigned char status : 4; // 4bit status opcode without channel info (ie 8 for channel)
         };
     };
     unsigned char dataByte1, dataByte2;
