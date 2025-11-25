@@ -497,28 +497,38 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 						if (core_sx_count == sizeof(SYSEX_UNIVERSAL_HEADER)) 
 						{
 							updatePointers();
-							if 	(								 		
-									headerUniv->syx_universal == SX_UNIVERSAL_NON_REALTIME   &&		
-									headerUniv->sub_id_1      == SX_UNV_GENERAL_INFO	 	   
-								)	
+							if 	(headerUniv->syx_universal == SX_UNIVERSAL_NON_REALTIME)	
 							{    
-								// process universal sysex messages here
-								switch(headerUniv->sub_id_2)
+								switch(headerUniv->sub_id_1)
 								{
-									case SX_UNV_DEVID_REQ:
-										if (cb_rx_id_request) 
-											cb_rx_id_request(context_rx);
+									case SX_UNV_GENERAL_INFO:
+									{
+										// process universal sysex messages here
+										switch(headerUniv->sub_id_2)
+										{
+											case SX_UNV_DEVID_REQ:
+												if (cb_rx_id_request) 
+													cb_rx_id_request(context_rx);
+												break;
+											case SX_UNV_DEVID_REPLY:
+												rx_state = CORE_SX_ID_REPLY;
+												break;
+											default:
+												if (cb_debugPrint)
+													cb_debugPrint(context_dp, "WARN: unrecognized Syx GenInfo");
+												rx_set_ignore();
+												break;
+										}
 										break;
-									case SX_UNV_DEVID_REPLY:
-										rx_state = CORE_SX_ID_REPLY;
-										break;
+									}
 									default:
+										if (cb_debugPrint)
+											cb_debugPrint(context_dp, "WARN: unrecognized UnivSyx");
 										rx_set_ignore();
 										break;
 								}
-							} //***end of if          
-							
-
+								
+							} //*** end SX_UNIVERSAL_NON_REALTIME      
 						} //***end of if size == SYSEX_UNIVERSAL_HEADER   
 						
 						// *************************************************
@@ -557,6 +567,13 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 									if (cb_debugPrint)
 										cb_debugPrint(context_dp, "SYX FORMAT INVALID");
 								}
+								break;
+							}
+							else
+							{
+								if (cb_debugPrint)
+									cb_debugPrint(context_dp, "SYX MFG ID MISMATCH");
+								rx_set_ignore();
 								break;
 							}
 						}
