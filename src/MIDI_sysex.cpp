@@ -176,6 +176,35 @@ int16_t SysExMessageTX::sendSysExIDReply()
 }
 
 
+// Send a "raw" message in 7bit unencoded format, but with our header and category/type
+// The length of these messages must either be strictly defined/understood by sender/receiver, or at least handled with sysex stop
+int16_t SysExMessageTX::sendSyxUnEncodedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t* ptr, uint16_t length)
+{
+	if (!cb_tx_Send)
+    	return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION; 
+	
+	int returnCode = SYX_SEND_RETURN_CODE_OK;
+
+    uint8_t header[] = 
+	{
+		MIDI_SX_START,
+		kmi_id_1,
+		kmi_id_2,
+		kmi_id_3,
+		PID_MIDI_MSB, 
+		targetPID,
+		SYX_FORMAT_NO_ENCODING,      
+		category,
+		type    
+	};
+
+	clear();
+    array(header, sizeof(header));
+	array(ptr, length);
+	single(MIDI_SX_STOP); // MIDI_SX_STOP triggers send, so we don't need to call send here
+}
+
+
 // This is the PacketData format, used by most KMI/MK products.
 // Note: certain product firmware (like Dan's Riser Bootloader) requires that we flush the syx encoding after the preamble 
 // and before the data payload. This option has to be handled by the application.

@@ -18,7 +18,6 @@
 extern "C" 
 {
 #endif
-    //#include "utils.h"
 #ifdef __cplusplus
 }
 #endif
@@ -224,7 +223,8 @@ class SysExMessageTX {
         int16_t sendSysExIDRequest();
         int16_t sendSysExIDReply();
         int16_t sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t* ptr, uint16_t length);
-    
+        int16_t sendSyxUnEncodedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t* ptr, uint16_t length);
+
         uint8_t* getData() { return buffer; };
         size_t getSize() const { return size; };
         uint16_t getCRC() const { return crc; }
