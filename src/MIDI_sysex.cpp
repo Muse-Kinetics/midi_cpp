@@ -199,9 +199,13 @@ int16_t SysExMessageTX::sendSyxUnEncodedMessage(uint8_t targetPID, uint8_t categ
 	};
 
 	clear();
-    array(header, sizeof(header));
-	array(ptr, length);
-	single(MIDI_SX_STOP); // MIDI_SX_STOP triggers send, so we don't need to call send here
+    if (!array(header, sizeof(header)))
+		returnCode = SYX_SEND_RETURN_CODE_ERROR;
+	if (!array(ptr, length))
+		returnCode = SYX_SEND_RETURN_CODE_ERROR;
+	if (!single(MIDI_SX_STOP)) // MIDI_SX_STOP triggers send, so we don't need to call send here
+		returnCode = SYX_SEND_RETURN_CODE_ERROR;
+	return returnCode;
 }
 
 
