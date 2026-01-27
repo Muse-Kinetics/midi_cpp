@@ -218,6 +218,10 @@ class SysExMessageTX {
         void setCB_tx_Context(void* ctx) { context_tx = ctx; }
         void setCB_send(SendCallback cb) { cb_tx_Send = cb; }
         void setFlush(SYX_FLUSH flush) { flushAfterPreamble = flush; }
+
+        // Flag to indicate sysex message is being built - checked by timer interrupt
+        // to prevent partial transmission
+        volatile bool building = false;
     
         int16_t makeSyxHeader(uint8_t targetPID);
         int16_t sendSysExIDRequest();

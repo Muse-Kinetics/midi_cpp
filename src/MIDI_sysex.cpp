@@ -88,6 +88,7 @@ int16_t SysExMessageTX::encode_char(uint8_t val)
     if (++midi_hi_count == SX_ENCODE_LEN) {
         midi_hi_count = 0;
         returnCode = single(midi_hi_bits);
+        midi_hi_bits = 0;  // Reset for next encoding group
     }
 	return returnCode;
 }
@@ -219,6 +220,8 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
 	if (!cb_tx_Send)
     	return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION; 
 
+	building = true;  // Block timer interrupt from transmitting until complete
+
 	int returnCode = SYX_SEND_RETURN_CODE_OK;
 
     makeSyxHeader(targetPID);
@@ -268,6 +271,8 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
     // end 7/8bit encoding
     flush_encode();
     single(MIDI_SX_STOP); // MIDI_SX_STOP triggers send, so we don't need to call send here
+
+	building = false;  // Allow timer interrupt to transmit again
 
 	clear();
 	return returnCode;
