@@ -507,11 +507,11 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 			//printf("\n[%s] SX START\n", name);
 			rx_init();
 		} 
-		else // body of sysex payload 
+		else if (ignore_rx == false) // body of sysex payload 
 		{
 			uint16_t core_sx_count = getSize();
 			// make sure we aren't overloading our buffers/memory
-			if (core_sx_count > SYX_RX_BLOCK_SIZE || ignore_rx == true)
+			if (core_sx_count > SYX_RX_BLOCK_SIZE)
 			{
 				if (cb_debugPrint)
 					cb_debugPrint(context_dp, "ERR: SYX RX buffer overflow!");
