@@ -58,6 +58,10 @@ int16_t SysExMessageTX::array(const uint8_t* bytes, size_t length)
     for (size_t i = 0; i < length; ++i)
 	{
         returnCode = single(bytes[i]);
+		if (returnCode != SYX_SEND_RETURN_CODE_OK)
+		{
+			break;
+		}
 	}
 	
 	return returnCode;
@@ -200,12 +204,18 @@ int16_t SysExMessageTX::sendSyxUnEncodedMessage(uint8_t targetPID, uint8_t categ
 	};
 
 	clear();
-    if (!array(header, sizeof(header)))
-		returnCode = SYX_SEND_RETURN_CODE_ERROR;
-	if (!array(ptr, length))
-		returnCode = SYX_SEND_RETURN_CODE_ERROR;
-	if (!single(MIDI_SX_STOP)) // MIDI_SX_STOP triggers send, so we don't need to call send here
-		returnCode = SYX_SEND_RETURN_CODE_ERROR;
+    if (array(header, sizeof(header)) != SYX_SEND_RETURN_CODE_OK)
+	{
+		return SYX_SEND_RETURN_CODE_ERROR;
+	}
+	if (array(ptr, length) != SYX_SEND_RETURN_CODE_OK)
+	{
+		return SYX_SEND_RETURN_CODE_ERROR;
+	}
+	if (single(MIDI_SX_STOP) != SYX_SEND_RETURN_CODE_OK) // MIDI_SX_STOP triggers send, so we don't need to call send here
+	{
+		return SYX_SEND_RETURN_CODE_ERROR;
+	}
 	return returnCode;
 }
 
@@ -494,8 +504,8 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 				{
 					// // EB TODO: does it matter if this is bootloader or not?
 					// if (endpointType() == SERIAL_ENDPOINT && con_status != CON_RISER_APP) // we received sysex as our first uart message but we haven't completed a handshake, so request id
-					if (syxSendPtr)
-						syxSendPtr->sendSysExIDRequest(); 
+					// if (syxSendPtr)
+					// 	syxSendPtr->sendSysExIDRequest(); 
 					break;
 				}
 			}
