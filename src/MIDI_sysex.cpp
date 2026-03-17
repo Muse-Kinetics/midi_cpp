@@ -57,10 +57,18 @@ int16_t SysExMessageTX::array(const uint8_t* bytes, size_t length)
 
     for (size_t i = 0; i < length; ++i)
 	{
-        returnCode = single(bytes[i]);
-		if (returnCode != SYX_SEND_RETURN_CODE_OK)
+		const uint8_t byte = bytes[i];
+		buffer[size++] = byte;
+		if (size >= sizeof(buffer) || byte == MIDI_SX_STOP)
 		{
-			break;
+			if (cb_tx_Send)
+				returnCode = cb_tx_Send(context_tx, &buffer[0], size); // send the buffer
+				
+			clear(); // reset the buffer
+			if (returnCode != SYX_SEND_RETURN_CODE_OK)
+			{
+				break;
+			}
 		}
 	}
 	
