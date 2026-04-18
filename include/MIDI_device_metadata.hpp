@@ -6,9 +6,10 @@
   File:        MIDI_device_metadata.hpp
   Description: Constants, enums, and structs to store device metadata
 
-  Copyright © 2025 KMI Music, Inc. All rights reserved.
-  Unauthorized copying of this file, via any medium, is strictly prohibited.
-  Proprietary and confidential.
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
 
   ----------------------------------------------------------------------------
 */
@@ -22,8 +23,6 @@
 #define kmi_id_1 				0x00
 #define kmi_id_2 				0x01
 #define kmi_id_3				0x5F
-
-#define chuck_magic_number		0x7A // might not have been Chuck but this is our mysterious fourth sysex manufacturer ID number
 
 #define kmi_family_lsb			0x00
 #define kmi_family_msb			0x00

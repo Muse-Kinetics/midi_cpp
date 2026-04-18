@@ -1,3 +1,7 @@
+// Copyright (c) 2026 KMI Music, Inc.
+// SPDX-License-Identifier: MIT
+// Author: Eric Bateman <eric@musekinetics.com>
+
 #ifndef UTILS_CRC_H
 #define UTILS_CRC_H
 

@@ -6,9 +6,10 @@
   File:        MIDI_sysex.cpp
   Description: Methods to encode and decode KMI formatted SysEx Messages
 
-  Copyright © 2025 KMI Music, Inc. All rights reserved.
-  Unauthorized copying of this file, via any medium, is strictly prohibited.
-  Proprietary and confidential.
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
 
   ----------------------------------------------------------------------------
 */
@@ -146,7 +147,7 @@ int16_t SysExMessageTX::makeSyxHeader(uint8_t targetPID)
         kmi_id_1,
         kmi_id_2,
         kmi_id_3,
-        PID_MIDI_MSB, // banish chuck's number from whence it came
+        PID_MIDI_MSB, 
         targetPID,
         SYX_FORMAT_KMI,          
         0, // four zeroes to align midi monitor any any encoding flush
@@ -606,9 +607,9 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 									//printf("[%s] begin CORE_SX_PACKET_START_SEARCH\n", name);
 									rx_state = CORE_SX_PACKET_START_SEARCH;
 								}
-								else if (headerStd->format == SYX_FORMAT_DANS_EDITOR_MESSAGE)
+								else if (headerStd->format == SYX_FORMAT_KBP4_EDITOR_MESSAGE)
 								{
-									//printf("[%s] begin SYX_FORMAT_DANS_EDITOR_MESSAGE\n", name);
+									//printf("[%s] begin SYX_FORMAT_KBP4_EDITOR_MESSAGE\n", name);
 									packet_data_index = size;
 									packet_data = &buffer[packet_data_index];
 									rx_state = CORE_SX_HOST_DATA;

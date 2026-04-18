@@ -24,7 +24,8 @@ This library should remain compatible with the KMI MIDI Device Manage (KMDM) lib
 
 * Eric Bateman - eric@musekinetics.com
 
-### Licensing / Copyright ###
+### Licensing ###
 
-(c) 2025 KMI Music, Inc.
-This is not an open source library, redistribution outside of KMI is prohibited
+Copyright (c) 2026 KMI Music, Inc.
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

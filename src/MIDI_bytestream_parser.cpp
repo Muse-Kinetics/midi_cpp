@@ -1,12 +1,13 @@
 /*
   ----------------------------------------------------------------------------
-  File:        bytestream_parser.cpp
+  File:        MIDI_bytestream_parser.cpp
   Description: Receive a MIDI bytestream, put SysEx into a SysExMessage object,
   all other data gets constructed into Realtime and Channel messages.
 
-  Copyright © 2025 KMI Music, Inc. All rights reserved.
-  Unauthorized copying of this file, via any medium, is strictly prohibited.
-  Proprietary and confidential.
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
 
   ----------------------------------------------------------------------------
 */

@@ -6,9 +6,10 @@
   File:        MIDI_usb.hpp
   Description: Common enums, structs, and constants for handling USB MIDI messages
 
-  Copyright © 2025 KMI Music, Inc. All rights reserved.
-  Unauthorized copying of this file, via any medium, is strictly prohibited.
-  Proprietary and confidential.
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
 
   ----------------------------------------------------------------------------
 */
