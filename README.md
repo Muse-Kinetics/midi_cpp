@@ -16,9 +16,9 @@ This library should remain compatible with the KMI MIDI Device Manage (KMDM) lib
 
 ### Products that use this library ###
 
-* EM Pro EMC Control PCB
-* EM Pro SoundStation
+* Pearl MalletStation EM Pro
 * EM Pro Sound Card
+* More in development
 
 ### Authors ###
 
