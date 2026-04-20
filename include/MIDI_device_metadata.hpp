@@ -41,6 +41,44 @@
 
 #define SX_ADDRESS				0x00 // the sysex address/id/channel of this device
 
+struct version_t
+{
+    uint8_t major, minor, patch, dev; // dev is not checked by editors/hosts as there should never be multiple public releases of a patch with different dev versions
+
+    // Comparison operator
+    bool operator<(const version_t& other) const {
+        if (major != other.major) return major < other.major;
+        if (minor != other.minor) return minor < other.minor;
+        return patch < other.patch;
+    }
+
+    // Equality operator
+    bool operator==(const version_t& other) const {
+        return (major == other.major) &&
+               (minor == other.minor) &&
+               (patch == other.patch);
+    }
+
+    // Not equal operator
+    bool operator!=(const version_t& other) const {
+        return !(*this == other);
+    }
+
+    // Greater than operator
+    bool operator>(const version_t& other) const {
+        return other < *this;
+    }
+
+    // Less than or equal to operator
+    bool operator<=(const version_t& other) const {
+        return !(other < *this);
+    }
+
+    // Greater than or equal to operator
+    bool operator>=(const version_t& other) const {
+        return !(*this < other);
+    }
+};
 
 extern uint8_t deviceIDraw[DEVICE_ID_REPLY_HEADER_SIZE];
 

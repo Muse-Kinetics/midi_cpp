@@ -164,7 +164,7 @@ int16_t SysExMessageTX::makeSyxHeader(uint8_t targetPID)
 int16_t SysExMessageTX::sendSysExIDRequest()
 {
 	clear();
-    uint8_t idReq[] = {MIDI_SX_START, SX_UNIVERSAL_NON_REALTIME, SX_ADDRESS, SX_UNV_GENERAL_INFO, SX_UNV_DEVID_REQ, MIDI_SX_STOP};
+    uint8_t idReq[] = {MIDI_SX_START, SX_UNIVERSAL_NON_REALTIME, SX_ADDRESS_ALL, SX_UNV_GENERAL_INFO, SX_UNV_DEVID_REQ, MIDI_SX_STOP};
     array(idReq, sizeof(idReq));
 	// MIDI_SX_STOP triggers send, so we don't need to call send here
 
