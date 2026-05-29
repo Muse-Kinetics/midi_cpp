@@ -28,8 +28,8 @@ extern "C"
 
 /* C++ Includes  *************************************************************************************/
 #include <cstdint>
-#include <cstring>
 #include <cstddef>
+
 
 #include "MIDI_CPP_config.hpp"
 #include "MIDI.hpp"
@@ -82,7 +82,7 @@ enum SYX_RX_STATE
 enum SYX_FORMAT
 {
     SYX_FORMAT_KMI,
-    SYX_FORMAT_DANS_EDITOR_MESSAGE, // could also be OSC for EM1
+    SYX_FORMAT_KBP4_EDITOR_MESSAGE, // could also be OSC for EM1
     SYX_FORMAT_NO_ENCODING
 };
 

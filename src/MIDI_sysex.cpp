@@ -1,6 +1,5 @@
 #include "MIDI_sysex.hpp"
 
-#include <stdio.h>
 /*
   ----------------------------------------------------------------------------
   File:        MIDI_sysex.cpp
@@ -17,8 +16,15 @@
 
 #include "MIDI_sysex.hpp"
 #include "utils_crc.h"
-#include <cstring>
-#include <cstdio>
+
+/* Forward-declare snprintf to avoid pulling in Redlib stdio.h (which uses
+   'new' as a parameter name — illegal in C++ mode).  The function lives in
+   libcr_c; size_t is unsigned int on this 32-bit ARM target.             */
+extern "C" int snprintf(char *buf, unsigned int n, const char *fmt, ...);
+
+extern "C" { 
+#include <string.h>  /* use C header directly — Redlib cstring wrapper breaks memset linkage */
+}
 
 //----------------------------------------
 // TX Implementation

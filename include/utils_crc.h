@@ -19,11 +19,7 @@
 //
 //*****************************************************************************
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-static inline void crc_init(uint16_t *this_crc)
+inline void crc_init(uint16_t *this_crc)
 {
     *this_crc = 0xFFFF;
 }
@@ -31,7 +27,7 @@ static inline void crc_init(uint16_t *this_crc)
 // WARNING: CRC checks are dependent on system architecture (8bit, 32bit, little/big endian). 
 // Legacy KMI devices that crc was implemented under were 8bit little-endian, mismatches in
 // architecture can cause issues during the calculation below, not just in the final result.
-static inline void crc_byte(uint16_t *this_crc, uint8_t val)
+inline void crc_byte(uint16_t *this_crc, uint8_t val)
 {
 	uint16_t temp;
 	uint16_t quick;
@@ -60,7 +56,7 @@ static inline void crc_byte(uint16_t *this_crc, uint8_t val)
 	//printf("output %d\n", crc_val);
 }
 
-static inline void crc_append_buf(uint16_t *this_crc, const uint8_t *ptr, uint16_t length)
+inline void crc_append_buf(uint16_t *this_crc, const uint8_t *ptr, uint16_t length)
 {
     while (length--)
     {
@@ -68,15 +64,11 @@ static inline void crc_append_buf(uint16_t *this_crc, const uint8_t *ptr, uint16
     }
 }
 
-static inline uint16_t crc_buf(uint16_t *this_crc, const uint8_t *ptr, uint16_t length)
+inline uint16_t crc_buf(uint16_t *this_crc, const uint8_t *ptr, uint16_t length)
 {
     crc_init(this_crc);
     crc_append_buf(this_crc, ptr, length);
     return *this_crc;
 }
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* UTILS_CRC_H */
