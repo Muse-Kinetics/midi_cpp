@@ -37,7 +37,8 @@
 #define PID_MIDI_EMPRO				0x2E // 46
 #define PID_MIDI_EMPRO_SAMPLER		0x2F // 47
 #define PID_MIDI_EPERC				0x32 // 50
-#define PID_MIDI_SOUNDSTATION 0x30
+#define PID_MIDI_SOUNDSTATION       0x30
+#define PID_MIDI_MIMIC_HUB          0x3D
 
 #define SX_ADDRESS				0x00 // the sysex address/id/channel of this device
 
