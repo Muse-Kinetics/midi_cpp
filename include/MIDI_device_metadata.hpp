@@ -83,4 +83,10 @@ struct version_t
 
 extern uint8_t deviceIDraw[DEVICE_ID_REPLY_HEADER_SIZE];
 
+// Runtime product ID — initialized from SYX_PRODUCT_ID_LSB (MIDI_CPP_config.hpp).
+// Use setMidiProductId() to change at runtime; getMidiProductId() to read back.
+// deviceIDraw[8] is kept in sync automatically.
+uint8_t getMidiProductId();
+void    setMidiProductId(uint8_t id);
+
 #endif/* MIDI_DEVICE_METADATA_H */
