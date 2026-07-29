@@ -1,0 +1,94 @@
+/*
+  ----------------------------------------------------------------------------
+  File:        midi2_resources.cpp.template
+
+  Description: Example product Property Exchange resources for the MIDI_CPP
+  UMP_Endpoint. TEMPLATE: copy into your application, remove ".template", and
+  replace the example struct/table with your own product parameters.
+
+  Two resource forms are shown:
+    1. Declarative field table (preferred). Map JSON keys straight onto your
+       backing variables; the engine auto-serialises Get, auto-applies Set, and
+       auto-derives the JSON Schema for the ResourceList. A property name is
+       written exactly once. Optional onApplied(ctx) fires once per Set for
+       side-effects (recompute, LEDs, persistence).
+    2. Escape hatch (get/set callbacks) for irregular/computed resources that
+       don't fit a flat field table.
+
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
+  ----------------------------------------------------------------------------
+*/
+#ifdef ENABLE_MIDI2
+
+#include "midi2_resources.hpp"
+#include <cstdio>   // snprintf
+
+namespace midi2
+{
+namespace
+{
+    // ---- Example backing data (TODO: replace with your product's parameters) -
+    struct MySettings
+    {
+        uint16_t sensitivity;
+        uint16_t debounceMs;
+        uint8_t  channel;
+    };
+    MySettings settings = { 512, 20, 1 };
+
+    // ---- Declarative field table -> "X-Settings" -----------------------------
+    // Columns: name, &backing, type[, min, max, size]. Trailing min/max/size may
+    // be omitted (default 0 = unbounded / n/a). min != max enables Set clamping.
+    const UMP_PEField kSettingsFields[] = {
+        { "sensitivity", &settings.sensitivity, PE_U16, 0, 1023 },
+        { "debounceMs",  &settings.debounceMs,  PE_U16, 0, 1000 },
+        { "channel",     &settings.channel,     PE_U8,  1, 16   },
+    };
+    constexpr uint8_t kSettingsFieldCount = sizeof(kSettingsFields) / sizeof(kSettingsFields[0]);
+
+    // Optional: fired once after a successful Set batch. Return false to reject
+    // the whole Set (-> status 400). Do recompute / LED refresh / persistence here.
+    bool onSettingsApplied(void * /*ctx*/)
+    {
+        // TODO: react to the new settings (they are already written to `settings`).
+        return true;
+    }
+
+    // ---- Escape hatch -> "X-FirmwareInfo" (computed strings) ------------------
+    int getFirmwareInfo(char *out, int cap, void * /*ctx*/)
+    {
+        int n = snprintf(out, (size_t)cap,
+            "{\"version\":\"%s\",\"build\":\"%s %s\"}",
+            "1.0.0" /* TODO: your version string */, __DATE__, __TIME__);
+        return (n < 0 || n >= cap) ? -1 : n;
+    }
+    const char kFirmwareInfoSchema[] =
+        "{\"title\":\"Firmware Info\",\"type\":\"object\","
+        "\"properties\":{\"version\":{\"type\":\"string\"},\"build\":{\"type\":\"string\"}}}";
+
+    // Resource table: {name, title, fields, fieldCount, writable, onApplied, ctx,
+    //                  get, set, schema}. Manufacturer-specific names start "X-".
+    const UMP_PEResource kResources[] = {
+        { "X-Settings", "Settings", kSettingsFields, kSettingsFieldCount,
+          /*writable*/ true, onSettingsApplied, /*ctx*/ nullptr,
+          /*get*/ nullptr, /*set*/ nullptr, /*schema*/ nullptr },   // schema auto-derived
+
+        { "X-FirmwareInfo", "Firmware Info", /*fields*/ nullptr, 0,
+          /*writable*/ false, /*onApplied*/ nullptr, /*ctx*/ nullptr,
+          /*get*/ getFirmwareInfo, /*set*/ nullptr, /*schema*/ kFirmwareInfoSchema },
+    };
+    constexpr uint8_t kResourceCount = sizeof(kResources) / sizeof(kResources[0]);
+} // anonymous namespace
+
+const UMP_PEResource *peResources(uint8_t *countOut)
+{
+    *countOut = kResourceCount;
+    return kResources;
+}
+
+} // namespace midi2
+
+#endif // ENABLE_MIDI2

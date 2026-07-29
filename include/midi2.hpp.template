@@ -1,0 +1,52 @@
+/*
+  ----------------------------------------------------------------------------
+  File:        midi2.hpp.template
+
+  Description: Example application glue for the MIDI_CPP UMP_Endpoint engine.
+  This is a TEMPLATE: copy it into your application, remove the ".template"
+  suffix, and adapt the marked (TODO) product specifics. The portable engine
+  lives in MIDI_CPP (MIDI_ump.hpp); this thin layer wires it to your transport,
+  serial/identity, and Property Exchange resources.
+
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
+  ----------------------------------------------------------------------------
+*/
+#ifndef MIDI2_HPP
+#define MIDI2_HPP
+
+// All MIDI 2.0 functionality is guarded by ENABLE_MIDI2. With the flag removed,
+// this header is empty and the firmware builds/behaves as a USB MIDI 1.0 device.
+// NOTE: consuming PlatformIO projects must set `lib_ldf_mode = chain+` so the
+// AM_MIDI2.0Lib dependency is only pulled in when ENABLE_MIDI2 is defined.
+#ifdef ENABLE_MIDI2
+
+#include <cstdint>
+
+namespace midi2
+{
+    /// Configure the UMP endpoint (names, serial, transport, PE resources) and
+    /// register its UMP Stream / MIDI-CI callbacks. Call once at startup.
+    void init();
+
+    /// Drain the inbound UMP FIFO and flush queued outbound UMP. Call once per
+    /// main-loop pass.
+    void poll();
+
+    /// Called from the transport RX path (e.g. USB OUT-complete IRQ) with the raw
+    /// endpoint bytes when the MIDI 2.0 Alternate Setting is active.
+    void onRxBytes(const uint8_t *buf, uint8_t len);
+
+    /// True when the host has selected the MIDI 2.0 (UMP) Alternate Setting.
+    bool isActive();
+
+    /// Bridge a MIDI 1.0 channel-voice triple (status + 2 data bytes) out as an
+    /// MT 0x4 UMP on the given UMP group.
+    void txChannelVoice(uint8_t status, uint8_t d1, uint8_t d2, uint8_t group = 0);
+}
+
+#endif // ENABLE_MIDI2
+
+#endif // MIDI2_HPP

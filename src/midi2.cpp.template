@@ -1,0 +1,140 @@
+/*
+  ----------------------------------------------------------------------------
+  File:        midi2.cpp.template
+
+  Description: Example application glue for the MIDI_CPP UMP_Endpoint engine.
+  This is a TEMPLATE: copy it into your application, remove the ".template"
+  suffix, and adapt the marked (TODO) product specifics — transport, MCU serial,
+  entropy source, and identity strings.
+
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
+  ----------------------------------------------------------------------------
+*/
+#ifdef ENABLE_MIDI2
+
+#include "midi2.hpp"
+#include "midi2_resources.hpp"   // product Property Exchange resource table
+#include "MIDI_ump.hpp"          // UMP_Endpoint (portable engine in MIDI_CPP)
+
+// TODO: include your transport + MCU headers, e.g.:
+//   #include "main.h"           // UID_BASE, DWT (STM32 example)
+//   #include "usb_midi.hpp"     // your USB MIDI TX + Alt-Setting accessor
+
+namespace midi2
+{
+namespace
+{
+    UMP_Endpoint endpoint;
+
+    // Product identity strings (borrowed by the engine; keep alive for its life).
+    char endpointName[] = "My Product";   // TODO: your UMP Endpoint name
+    char serialStr[13];                   // 12-hex Product Instance Id (MCU serial)
+
+    // One UMP Function Block spanning Group 0. Most single-port products need
+    // exactly one; give it a descriptive, user-facing name.
+    const UMP_FunctionBlock kFunctionBlocks[] = {
+        { /*firstGroup*/ 0, /*numGroups*/ 1, UMP_FB_BIDIRECTIONAL, "Main" },  // TODO: name
+    };
+    constexpr uint8_t kFunctionBlockCount = sizeof(kFunctionBlocks) / sizeof(kFunctionBlocks[0]);
+
+    // Transport: hand a packed UMP packet to your USB MIDI IN endpoint. Return
+    // true if accepted/queued, false if the TX path is busy (the engine keeps the
+    // remainder and retries on the next poll()).
+    bool emitUMP(const uint8_t *bytes, uint16_t len)
+    {
+        // TODO: return true only if the transport accepted all `len` bytes.
+        // return usbMIDI.interface_tx((uint8_t *)bytes, len) == STATUS_OK;
+        (void)bytes; (void)len;
+        return false;
+    }
+
+    void hexWord(uint32_t value, char *out, uint8_t nNibbles)
+    {
+        for (uint8_t i = 0; i < nNibbles; i++)
+        {
+            uint8_t nib = (uint8_t)((value >> 28) & 0xF);
+            out[i] = (nib < 0xA) ? (char)('0' + nib) : (char)('A' + nib - 0xA);
+            value <<= 4;
+        }
+    }
+
+    // Hardware entropy for the MIDI-CI MUID. Common Rules require a fresh,
+    // non-repeating MUID every power cycle, so mix a per-device baseline (MCU UID)
+    // with per-boot-variable runtime state sampled at first use. Stirred through
+    // xorshift32 — not cryptographic, only for MUID uniqueness.
+    uint32_t hwRandom()
+    {
+        static uint32_t state = 0;
+        if (state == 0)
+        {
+            // TODO: seed from your MCU unique ID.
+            // uint32_t s0 = *(volatile uint32_t *)(UID_BASE);
+            // uint32_t s1 = *(volatile uint32_t *)(UID_BASE + 4U);
+            // uint32_t s2 = *(volatile uint32_t *)(UID_BASE + 8U);
+            // state = s0 ^ s1 ^ s2;
+            if (state == 0) state = 0xA5A5A5A5u;
+        }
+        // TODO: stir in live per-boot entropy (cycle counter, free-running timer,
+        // ADC noise, etc.). The MUID is generated lazily at the first Discovery,
+        // seconds into runtime, so time-based sources vary widely between boots.
+        // state ^= DWT->CYCCNT;
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return state;
+    }
+
+    // 12-char hex Product Instance Id from the MCU unique ID. Make it match your
+    // USB serial-number string so host and UMP identities agree.
+    void buildSerial()
+    {
+        // TODO: derive from your MCU unique ID (STM32 example shown).
+        uint32_t s0 = 0, s1 = 0;
+        // uint32_t s0 = *(volatile uint32_t *)(UID_BASE);
+        // uint32_t s1 = *(volatile uint32_t *)(UID_BASE + 4U);
+        hexWord(s0, &serialStr[0], 8);
+        hexWord(s1, &serialStr[8], 4);
+        serialStr[12] = '\0';
+    }
+} // anonymous namespace
+
+void init()
+{
+    buildSerial();
+    endpoint.setEndpointName(endpointName);
+    endpoint.setProductInstanceId(serialStr);
+    endpoint.setManufacturerName("Your Company");   // TODO: PE DeviceInfo manufacturer string
+
+    uint8_t peCount = 0;
+    const UMP_PEResource *peRes = peResources(&peCount);   // product PE table (midi2_resources.cpp)
+    endpoint.setPEResources(peRes, peCount);
+
+    endpoint.setRandomSource(hwRandom);                    // MIDI-CI MUID entropy
+    endpoint.setFunctionBlocks(kFunctionBlocks, kFunctionBlockCount);
+    endpoint.setStaticFunctionBlocks(true);
+
+    // maxPacketSize = your USB MIDI IN endpoint size (e.g. 64 for USB FS bulk).
+    endpoint.init(emitUMP, /*maxPacketSize*/ 64);
+}
+
+void poll()                                        { endpoint.poll(); }
+void onRxBytes(const uint8_t *buf, uint8_t len)    { endpoint.onRxBytes(buf, len); }
+
+bool isActive()
+{
+    // TODO: true when the host selected the MIDI 2.0 (UMP) Alternate Setting.
+    // return USBD_MIDI_GetAltSetting(&hUsbDeviceFS) == 1;
+    return false;
+}
+
+void txChannelVoice(uint8_t status, uint8_t d1, uint8_t d2, uint8_t group)
+{
+    endpoint.sendMIDI1ChannelVoice(status, d1, d2, group);
+}
+
+} // namespace midi2
+
+#endif // ENABLE_MIDI2

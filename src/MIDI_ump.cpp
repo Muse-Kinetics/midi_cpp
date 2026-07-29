@@ -1,3 +1,15 @@
+/*
+  ----------------------------------------------------------------------------
+  File:        MIDI_ump.cpp
+
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
+
+  Portions built on AM_MIDI2.0Lib (Andrew Mee), MIT License.
+  ----------------------------------------------------------------------------
+*/
 /**
  * @file MIDI_ump.cpp
  * @brief Portable USB MIDI 2.0 / UMP Endpoint engine. See MIDI_ump.hpp.
@@ -17,7 +29,10 @@
 #include "MIDI_device_metadata.hpp" // kmi_id_*, kmi_family_*, PID_MIDI_MSB, getMidiProductId(), SYX_ID_APP_VER*
 
 #include "umpMessageCreate.h"
+#include "midiCIMessageCreate.h"   // CIMessage::send* Capability Inquiry builders
 #include <cstring>
+#include <cstdio>                  // snprintf (Property Exchange JSON bodies)
+#include <cstdlib>                 // strtol / strtod (Restricted-JSON value readers)
 
 namespace
 {
@@ -38,9 +53,255 @@ namespace
     // ---- Function Block Info fields common to all blocks (per-block group/dir/
     //      name come from the UMP_FunctionBlock array) --------------------------
     constexpr uint8_t FB_INDEX_ALL          = 0xFF;  // FB Discovery "all blocks"
-    constexpr uint8_t FB_MIDICI_SUPPORT     = 0;     // no MIDI-CI yet (set in M5)
+    constexpr uint8_t FB_MIDICI_SUPPORT     = 2;     // MIDI-CI message version format 1.2 (M5)
     constexpr uint8_t FB_IS_MIDI1           = 0;     // MIDI 2.0 protocol
     constexpr uint8_t FB_MAX_SYSEX8_STREAMS = 0;
+
+    // ---- MIDI-CI (M5) --------------------------------------------------------
+    // Common Rules for MIDI-CI require Max SysEx Size >= 512 whenever Profile
+    // Configuration or Property Exchange is advertised. We advertise more headroom
+    // (1024) so the ResourceList — which now carries an auto-derived JSON Schema
+    // per settable field-based resource — and the multi-field Get/Set bodies fit a
+    // single PE message. Payloads beyond this would need real PE chunking (future).
+    constexpr uint32_t CI_MAX_SYSEX    = 1024;
+    constexpr uint8_t  CI_OUTPUT_PATH  = 0;
+    constexpr uint8_t  CI_FB_INDEX     = 0;     // Function Block that owns Capability Inquiry
+    // Capability Inquiry "Category Supported" bitmap (Discovery, M2-101 §Discovery).
+    // Verified against the MIDI2.0Workbench decoder: 0x04 = Profile Configuration,
+    // 0x08 = Property Exchange, 0x10 = Process Inquiry. Bits 0x01/0x02 are reserved
+    // (Protocol Negotiation was 0x01 in CI 1.1, deprecated in 1.2 — protocol is
+    // negotiated via the UMP Stream Configuration path in M2).
+    //  - Profile Configuration must NOT be advertised until at least one Profile
+    //    exists (a Profile-Inquiry reply must list >=1 Profile). Drums Profile
+    //    registers in M6; OR in CI_CAT_PROFILE then.
+    constexpr uint8_t  CI_CAT_PROFILE   = 0x04;   // (advertised starting M6)
+    constexpr uint8_t  CI_CAT_PROPERTY  = 0x08;
+    constexpr uint8_t  CI_CAT_PROCESS   = 0x10;   // (unused)
+    constexpr uint8_t  CI_CATEGORIES    = CI_CAT_PROPERTY;
+    // Property Exchange capabilities (handshake only in M5; resources land in M5 step 5).
+    constexpr uint8_t  PE_SIMUL_REQUESTS = 1;
+    constexpr uint8_t  PE_MAJ_VER = 0;
+    constexpr uint8_t  PE_MIN_VER = 0;
+    constexpr uint16_t PE_STATUS_OK = 200;
+
+    // Extract the "resource" value span from a Restricted-JSON PE header
+    // (Contribution 16: {"resource":"<name>"[,"option":...]}). Resolving the name
+    // to a resource once here (§4.3) avoids any post-dispatch string scanning.
+    bool peExtractName(const char *hdr, uint16_t len, const char **name, uint16_t *nameLen)
+    {
+        static const char tag[] = "\"resource\"";
+        const uint16_t tagLen = 10;
+        int p = -1;
+        for (uint16_t i = 0; (uint16_t)(i + tagLen) <= len; i++)
+        {
+            if (memcmp(hdr + i, tag, tagLen) == 0) { p = (int)i + tagLen; break; }
+        }
+        if (p < 0) return false;
+        while (p < (int)len && (hdr[p] == ':' || hdr[p] == ' ')) p++;
+        if (p >= (int)len || hdr[p] != '"') return false;
+        p++;                                    // past opening quote
+        const char *v = hdr + p;
+        uint16_t vlen = 0;
+        while ((uint16_t)(p + vlen) < len && v[vlen] != '"') vlen++;
+        *name = v;
+        *nameLen = vlen;
+        return true;
+    }
+
+    bool peNameIs(const char *name, uint16_t nameLen, const char *lit)
+    {
+        return strlen(lit) == (size_t)nameLen && memcmp(name, lit, nameLen) == 0;
+    }
+
+    // ---- Generic Restricted-JSON value readers (product-agnostic) -----------
+    // Locate `"key"` then return a pointer just past the following ':'. nullptr
+    // if the key is absent. Skips spaces. Not a full JSON parser — sufficient for
+    // the flat objects Property Exchange resources use.
+    const char *jsonValueAfterKey(const char *body, int len, const char *key)
+    {
+        int klen = (int)strlen(key);
+        for (int i = 0; i + klen + 2 <= len; i++)
+        {
+            if (body[i] == '"' && memcmp(body + i + 1, key, klen) == 0 && body[i + 1 + klen] == '"')
+            {
+                int p = i + 2 + klen;
+                while (p < len && (body[p] == ' ' || body[p] == '\t')) p++;
+                if (p < len && body[p] == ':')
+                {
+                    p++;
+                    while (p < len && (body[p] == ' ' || body[p] == '\t')) p++;
+                    return body + p;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    bool jsonFindInt(const char *body, int len, const char *key, long *out)
+    {
+        const char *v = jsonValueAfterKey(body, len, key);
+        if (v == nullptr) return false;
+        char *end = nullptr;
+        long n = strtol(v, &end, 10);
+        if (end == v) return false;
+        *out = n;
+        return true;
+    }
+
+    bool jsonFindFloat(const char *body, int len, const char *key, double *out)
+    {
+        const char *v = jsonValueAfterKey(body, len, key);
+        if (v == nullptr) return false;
+        char *end = nullptr;
+        double n = strtod(v, &end);
+        if (end == v) return false;
+        *out = n;
+        return true;
+    }
+
+    bool jsonFindStr(const char *body, int len, const char *key, char *out, int cap)
+    {
+        const char *v = jsonValueAfterKey(body, len, key);
+        if (v == nullptr || cap <= 0) return false;
+        const char *endBody = body + len;
+        if (v >= endBody || *v != '"') return false;
+        v++;                                            // past opening quote
+        int n = 0;
+        while (v < endBody && *v != '"' && n < cap - 1) out[n++] = *v++;
+        out[n] = '\0';
+        return true;
+    }
+
+    // ---- Declarative field engine (product-agnostic) ------------------------
+    long readFieldInt(const UMP_PEField &f)
+    {
+        switch (f.type)
+        {
+            case PE_U8:  return *(uint8_t  *)f.ptr;
+            case PE_U16: return *(uint16_t *)f.ptr;
+            case PE_U32: return (long)*(uint32_t *)f.ptr;
+            case PE_I8:  return *(int8_t   *)f.ptr;
+            case PE_I16: return *(int16_t  *)f.ptr;
+            case PE_I32: return *(int32_t  *)f.ptr;
+            case PE_BOOL:return *(bool     *)f.ptr ? 1 : 0;
+            default:     return 0;
+        }
+    }
+
+    void writeFieldInt(const UMP_PEField &f, long v)
+    {
+        if (f.min != f.max)                             // declarative clamp
+        {
+            if (v < f.min) v = f.min;
+            if (v > f.max) v = f.max;
+        }
+        switch (f.type)
+        {
+            case PE_U8:  *(uint8_t  *)f.ptr = (uint8_t)v;  break;
+            case PE_U16: *(uint16_t *)f.ptr = (uint16_t)v; break;
+            case PE_U32: *(uint32_t *)f.ptr = (uint32_t)v; break;
+            case PE_I8:  *(int8_t   *)f.ptr = (int8_t)v;   break;
+            case PE_I16: *(int16_t  *)f.ptr = (int16_t)v;  break;
+            case PE_I32: *(int32_t  *)f.ptr = (int32_t)v;  break;
+            case PE_BOOL:*(bool     *)f.ptr = (v != 0);    break;
+            default: break;
+        }
+    }
+
+    // Serialize a field table to a JSON object. Returns length or -1 on overflow.
+    int serializeFields(const UMP_PEField *fields, uint8_t n, char *out, int cap)
+    {
+        int p = 0;
+        if (p + 1 >= cap) return -1;
+        out[p++] = '{';
+        for (uint8_t i = 0; i < n; i++)
+        {
+            const UMP_PEField &f = fields[i];
+            const char *comma = i ? "," : "";
+            int m;
+            switch (f.type)
+            {
+                case PE_FLOAT: m = snprintf(out + p, cap - p, "%s\"%s\":%g", comma, f.name, (double)*(float *)f.ptr); break;
+                case PE_BOOL:  m = snprintf(out + p, cap - p, "%s\"%s\":%s", comma, f.name, (*(bool *)f.ptr) ? "true" : "false"); break;
+                case PE_STR:   m = snprintf(out + p, cap - p, "%s\"%s\":\"%s\"", comma, f.name, (const char *)f.ptr); break;
+                default:       m = snprintf(out + p, cap - p, "%s\"%s\":%ld", comma, f.name, readFieldInt(f)); break;
+            }
+            if (m < 0 || m >= cap - p) return -1;
+            p += m;
+        }
+        if (p + 2 > cap) return -1;
+        out[p++] = '}';
+        out[p]   = '\0';
+        return p;
+    }
+
+    // Apply a Set body to a field table. Only keys present in the body are written
+    // (partial payloads leave other fields untouched). Returns fields written.
+    int applySetFields(const UMP_PEResource &r, const uint8_t *body, uint16_t len)
+    {
+        const char *b = (const char *)body;
+        int applied = 0;
+        for (uint8_t i = 0; i < r.fieldCount; i++)
+        {
+            const UMP_PEField &f = r.fields[i];
+            if (f.type == PE_FLOAT)
+            {
+                double v;
+                if (jsonFindFloat(b, len, f.name, &v)) { *(float *)f.ptr = (float)v; applied++; }
+            }
+            else if (f.type == PE_STR)
+            {
+                if (jsonFindStr(b, len, f.name, (char *)f.ptr, f.size)) applied++;
+            }
+            else
+            {
+                long v;
+                if (jsonFindInt(b, len, f.name, &v)) { writeFieldInt(f, v); applied++; }
+            }
+        }
+        return applied;
+    }
+
+    // JSON Schema "type" keyword for a field type.
+    const char *jsonSchemaType(UMP_PEType t)
+    {
+        switch (t)
+        {
+            case PE_FLOAT: return "number";
+            case PE_BOOL:  return "boolean";
+            case PE_STR:   return "string";
+            default:       return "integer";
+        }
+    }
+
+    // Derive a JSON Schema object from a field table (single source of truth, so
+    // it can never drift from Get/Set). Returns length or -1 on overflow.
+    int buildSchemaFromFields(const char *title, const UMP_PEField *fields, uint8_t n, char *out, int cap)
+    {
+        int p = snprintf(out, cap, "{\"title\":\"%s\",\"type\":\"object\",\"properties\":{",
+                         title ? title : "");
+        if (p < 0 || p >= cap) return -1;
+        for (uint8_t i = 0; i < n; i++)
+        {
+            int m = snprintf(out + p, cap - p, "%s\"%s\":{\"type\":\"%s\"}",
+                             i ? "," : "", fields[i].name, jsonSchemaType(fields[i].type));
+            if (m < 0 || m >= cap - p) return -1;
+            p += m;
+        }
+        if (p + 3 > cap) return -1;
+        out[p++] = '}';
+        out[p++] = '}';
+        out[p]   = '\0';
+        return p;
+    }
+    // SysEx7 form nibble (M2-104 §4.2).
+    constexpr uint8_t  SX7_COMPLETE  = 0x0;
+    constexpr uint8_t  SX7_START     = 0x1;
+    constexpr uint8_t  SX7_CONTINUE  = 0x2;
+    constexpr uint8_t  SX7_END       = 0x3;
+    constexpr uint8_t  SX7_MAX_BYTES = 6;
+    // MIDI-CI SysEx framing bytes (see AM_MIDI2.0Lib utils.h: S7UNIVERSAL_NRT / S7MIDICI).
+    constexpr uint8_t  CI_MIN_SYSEX_LEN = 3;    // 0x7E, deviceId, 0x0D
 
     // ---- Stream Configuration protocol value (Workbench shows "protocol : 2") -
     constexpr uint8_t STREAM_PROTOCOL_MIDI2 = 0x02;
@@ -86,7 +347,7 @@ void UMP_Endpoint::init(UMPEmitFn emit, uint16_t maxPacketSize)
                           { onFunctionBlock(fbIdx, filter); });
     ump_.setStreamConfigRequest([this](uint8_t protocol, bool jrrx, bool jrtx)
                                 { onStreamConfigRequest(protocol, jrrx, jrtx); });
-    // Channel-voice / SysEx callbacks are wired in M4 / M5.
+    initCI();   // MIDI-CI (Capability Inquiry) on the Function Block
 }
 
 void UMP_Endpoint::onRxBytes(const uint8_t *buf, uint8_t len)
@@ -335,6 +596,438 @@ void UMP_Endpoint::onStreamConfigRequest(uint8_t protocol, bool jrrx, bool jrtx)
     (void)protocol;
     // We operate the MIDI 2.0 protocol on Group 0; acknowledge accordingly.
     queueUMP(UMPMessage::mtFNotifyProtocol(STREAM_PROTOCOL_MIDI2, jrrx, jrtx), UMP_WORDS_MAX);
+}
+
+// ============================================================================
+//  MIDI-CI (Capability Inquiry) — generic, Profile-pluggable (M5)
+//  Runs on the single Function Block. Fed MIDI-CI SysEx from the UMP transport
+//  (SysEx7), it answers Discovery, Profile Inquiry, and PE Capabilities. The
+//  Profile registry and PE resources are intentionally empty here — Drums
+//  Profile registers in M6 and PE resources arrive in M5 step 5.
+// ============================================================================
+
+// Draw a fresh 28-bit MUID. Common Rules for MIDI-CI require the MUID to be
+// regenerated each power cycle and not repeat across restarts, so we pull from
+// the app's hardware entropy source when one is set. Without it we fall back to a
+// *stable* hash of the Product Instance Id (deterministic — fails that rule; the
+// project is expected to call setRandomSource()).
+uint32_t UMP_Endpoint::makeMUID() const
+{
+    uint32_t r;
+    if (randFn_ != nullptr)
+    {
+        r = randFn_();
+    }
+    else
+    {
+        r = 2166136261u;                            // FNV-1a offset basis
+        for (const char *p = productInstanceId_; p && *p; ++p)
+        {
+            r ^= (uint8_t)*p;
+            r *= 16777619u;                         // FNV-1a prime
+        }
+    }
+    uint32_t muid = r & 0x0FFFFFFFu;                // MUID is 28-bit
+    if (muid == (uint32_t)M2_CI_BROADCAST)
+    {
+        muid ^= 0x1u;                               // never the broadcast MUID
+    }
+    return muid;
+}
+
+// Generate the MUID on first use rather than at boot, so the entropy source is
+// sampled once the device has been running (live DWT/ADC noise) — this keeps the
+// value reliably different across restarts.
+void UMP_Endpoint::ensureMUID()
+{
+    if (!muidValid_)
+    {
+        localMUID_ = makeMUID();
+        muidValid_ = true;
+    }
+}
+
+void UMP_Endpoint::initCI()
+{
+    // MUID is generated lazily (ensureMUID) on the first Discovery, not here.
+
+    ci_.setCheckMUID([this](uint8_t group, uint32_t muid, void *) { return ciCheckMUID(group, muid); });
+
+    ci_.setRecvDiscovery([this](MIDICI ci,
+                                std::array<uint8_t, 3>, std::array<uint8_t, 2>,
+                                std::array<uint8_t, 2>, std::array<uint8_t, 4>,
+                                uint8_t, uint16_t, uint8_t)
+                         { onCIDiscovery(ci); });
+
+    ci_.setRecvInvalidateMUID([this](MIDICI, uint32_t terminateMuid) { onCIInvalidateMUID(terminateMuid); });
+
+    ci_.setRecvProfileInquiry([this](MIDICI ci) { onCIProfileInquiry(ci); });
+
+    ci_.setPECapabilities([this](MIDICI ci, uint8_t, uint8_t, uint8_t) { onCIPECapabilities(ci); });
+
+    ci_.setRecvPEGetInquiry([this](MIDICI ci, std::string header)
+                            { onCIPEGetInquiry(ci, header.c_str(), (uint16_t)header.size()); });
+
+    ci_.setRecvPESetInquiry([this](MIDICI ci, std::string header, uint16_t bodyLen, uint8_t *body,
+                                   bool /*lastByteOfChunk*/, bool lastByteOfSet)
+                            { onCIPESetInquiry(ci, header.c_str(), (uint16_t)header.size(),
+                                               body, bodyLen, lastByteOfSet); });
+
+    // Route reassembled UMP SysEx7 into the CI processor.
+    ump_.setSysEx([this](umpData mess) { routeSysEx7(mess); });
+}
+
+bool UMP_Endpoint::ciCheckMUID(uint8_t group, uint32_t muid)
+{
+    (void)group;                        // single Function Block, Group 0
+    return muidValid_ && muid == localMUID_;
+}
+
+// A controller may ask us to drop our MUID (collision resolution). Invalidate it
+// so a fresh one is generated on the next Discovery.
+void UMP_Endpoint::onCIInvalidateMUID(uint32_t terminateMuid)
+{
+    if (muidValid_ && terminateMuid == localMUID_)
+    {
+        muidValid_ = false;
+    }
+}
+
+// A SysEx7 UMP arrives one packet at a time with a form nibble (M2-104 §4.2):
+// COMPLETE (single), START, CONTINUE, END. midiCIProcessor is a streaming byte
+// parser, so we open on START/COMPLETE, feed bytes, and close on END/COMPLETE —
+// but only for MIDI-CI SysEx (Universal Non-RT 0x7E, sub-ID 0x0D).
+void UMP_Endpoint::routeSysEx7(const umpData &mess)
+{
+    if (mess.form == SX7_COMPLETE || mess.form == SX7_START)
+    {
+        ciInProgress_ = (mess.dataLength >= CI_MIN_SYSEX_LEN
+                         && mess.data[0] == S7UNIVERSAL_NRT
+                         && mess.data[2] == S7MIDICI);
+        if (ciInProgress_)
+        {
+            uint8_t deviceId = (mess.dataLength >= 2) ? mess.data[1] : (uint8_t)FUNCTION_BLOCK;
+            ci_.startSysex7(mess.umpGroup, deviceId);
+        }
+    }
+
+    if (!ciInProgress_)
+    {
+        return;
+    }
+
+    for (uint8_t i = 0; i < mess.dataLength; i++)
+    {
+        ci_.processMIDICI(mess.data[i]);
+    }
+
+    if (mess.form == SX7_COMPLETE || mess.form == SX7_END)
+    {
+        ci_.endSysex7();
+        ciInProgress_ = false;
+    }
+}
+
+// Pack an already-built MIDI-CI SysEx body (0x7E ... last byte, no F0/F7) into
+// SysEx7 UMP packets (6 bytes/packet) and queue them for flush.
+void UMP_Endpoint::sendCISysex(uint8_t group, const uint8_t *body, uint16_t len)
+{
+    if (len == 0)
+    {
+        return;
+    }
+    uint16_t off = 0;
+    do
+    {
+        uint8_t n = (uint8_t)((len - off) < SX7_MAX_BYTES ? (len - off) : SX7_MAX_BYTES);
+        std::array<uint8_t, 6> sx = { 0, 0, 0, 0, 0, 0 };
+        for (uint8_t i = 0; i < n; i++)
+        {
+            sx[i] = body[off + i];
+        }
+        bool    first = (off == 0);
+        bool    last  = ((uint16_t)(off + n) >= len);
+        uint8_t form  = first ? (last ? SX7_COMPLETE : SX7_START)
+                              : (last ? SX7_END : SX7_CONTINUE);
+        queueUMP(UMPMessage::mt3Sysex7(group, form, n, sx), 2);
+        off += n;
+    } while (off < len);
+}
+
+// Discovery -> Discovery Reply, advertising our identity + supported categories
+// (Profile Configuration + Property Exchange). srcMUID is ours; destMUID is the
+// initiator (ci.remoteMUID).
+void UMP_Endpoint::onCIDiscovery(const MIDICI &ci)
+{
+    ensureMUID();   // first Discovery: pick this session's random MUID
+
+    std::array<uint8_t, 3> manuId   = { kmi_id_1, kmi_id_2, kmi_id_3 };
+    std::array<uint8_t, 2> familyId = { kmi_family_lsb, kmi_family_msb };
+    std::array<uint8_t, 2> modelId  = { getMidiProductId(), PID_MIDI_MSB };
+    std::array<uint8_t, 4> version  = { SYX_ID_APP_VER1, SYX_ID_APP_VER2,
+                                        SYX_ID_APP_VER3, SYX_ID_APP_VER4 };
+
+    uint8_t  sx[64];
+    uint16_t len = CIMessage::sendDiscoveryReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
+                                                 manuId, familyId, modelId, version,
+                                                 CI_CATEGORIES, CI_MAX_SYSEX,
+                                                 CI_OUTPUT_PATH, CI_FB_INDEX);
+    sendCISysex(ci.umpGroup, sx, len);
+}
+
+// Profile Inquiry -> Profile List Response. No profiles are registered until the
+// Drums Profile is added in M6, so both lists are empty for now.
+void UMP_Endpoint::onCIProfileInquiry(const MIDICI &ci)
+{
+    static uint8_t none[1] = { 0 };
+    uint8_t  sx[32];
+    uint16_t len = CIMessage::sendProfileListResponse(sx, ci.ciVer, localMUID_, ci.remoteMUID,
+                                                      FUNCTION_BLOCK, 0, none, 0, none);
+    sendCISysex(ci.umpGroup, sx, len);
+}
+
+// PE Capabilities Inquiry -> Reply (handshake). Advertises how many simultaneous
+// PE requests we accept; the actual resources are served in M5 step 5.
+void UMP_Endpoint::onCIPECapabilities(const MIDICI &ci)
+{
+    uint8_t  sx[32];
+    uint16_t len = CIMessage::sendPECapabilityReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
+                                                    PE_SIMUL_REQUESTS, PE_MAJ_VER, PE_MIN_VER);
+    sendCISysex(ci.umpGroup, sx, len);
+}
+
+// ---- Property Exchange Get (M5 step 5) -------------------------------------
+
+// Find a registered product resource by name span.
+const UMP_PEResource *UMP_Endpoint::findPEResource(const char *name, uint16_t nameLen)
+{
+    for (uint8_t i = 0; i < peResCount_; i++)
+    {
+        if (peNameIs(name, nameLen, peRes_[i].name)) return &peRes_[i];
+    }
+    return nullptr;
+}
+
+// PE Get Inquiry: resolve the requested resource (foundational or product),
+// build its JSON body, reply. Malformed header -> 400, unknown resource -> 404.
+// Bodies here fit a single PE chunk; larger payloads will need PE chunking.
+void UMP_Endpoint::onCIPEGetInquiry(const MIDICI &ci, const char *header, uint16_t len)
+{
+    const char *name    = nullptr;
+    uint16_t    nameLen = 0;
+    if (!peExtractName(header, len, &name, &nameLen))
+    {
+        sendPEReply(ci, MIDICI_PE_STATUS_BAD_REQ, nullptr, 0);               // 400
+        return;
+    }
+
+    int bodyLen = -1;
+    if (peNameIs(name, nameLen, "ResourceList"))
+    {
+        bodyLen = buildResourceListJSON(peJson_, (int)sizeof(peJson_));
+    }
+    else if (peNameIs(name, nameLen, "DeviceInfo"))
+    {
+        bodyLen = buildDeviceInfoJSON(peJson_, (int)sizeof(peJson_));
+    }
+    else if (peNameIs(name, nameLen, "ChannelList"))
+    {
+        bodyLen = buildChannelListJSON(peJson_, (int)sizeof(peJson_));
+    }
+    else
+    {
+        const UMP_PEResource *r = findPEResource(name, nameLen);
+        if (r != nullptr)
+        {
+            if (r->fields != nullptr)   // declarative
+            {
+                bodyLen = serializeFields(r->fields, r->fieldCount, peJson_, (int)sizeof(peJson_));
+            }
+            else if (r->get != nullptr) // escape hatch
+            {
+                bodyLen = r->get(peJson_, (int)sizeof(peJson_), r->ctx);
+            }
+        }
+    }
+
+    if (bodyLen < 0)
+    {
+        sendPEReply(ci, MIDICI_PE_STATUS_RESOURCE_UNSUPPORTED, nullptr, 0);   // 404
+        return;
+    }
+    sendPEReply(ci, PE_STATUS_OK, (const uint8_t *)peJson_, (uint16_t)bodyLen);
+}
+
+// PE Set Inquiry: reassemble the body across the CI processor's <=256-byte
+// slices, then on the final slice resolve the resource and apply. Field-based
+// writable resources are applied via the field table (+ optional onApplied hook);
+// escape-hatch resources go to their set() callback. Read-only -> 405, unknown ->
+// 404, malformed header -> 400.
+void UMP_Endpoint::onCIPESetInquiry(const MIDICI &ci, const char *header, uint16_t headerLen,
+                                    const uint8_t *body, uint16_t bodyLen, bool lastByteOfSet)
+{
+    for (uint16_t i = 0; i < bodyLen; i++)
+    {
+        if (peSetLen_ < sizeof(peSetBuf_)) peSetBuf_[peSetLen_++] = body[i];
+    }
+    if (!lastByteOfSet)
+    {
+        return;   // more slices coming
+    }
+
+    uint16_t total = peSetLen_;
+    peSetLen_ = 0;                        // reset for the next Set
+
+    const char *name    = nullptr;
+    uint16_t    nameLen = 0;
+    if (!peExtractName(header, headerLen, &name, &nameLen))
+    {
+        sendPESetReplyStatus(ci, MIDICI_PE_STATUS_BAD_REQ);                   // 400
+        return;
+    }
+
+    const UMP_PEResource *r = findPEResource(name, nameLen);
+    if (r == nullptr)
+    {
+        sendPESetReplyStatus(ci, MIDICI_PE_STATUS_RESOURCE_UNSUPPORTED);      // 404
+        return;
+    }
+
+    uint16_t status;
+    if (r->fields != nullptr)
+    {
+        if (!r->writable)
+        {
+            status = MIDICI_PE_STATUS_RESOURCE_NOT_ALLOWED;                   // 405
+        }
+        else
+        {
+            applySetFields(*r, peSetBuf_, total);
+            bool ok = (r->onApplied == nullptr) || r->onApplied(r->ctx);
+            status = ok ? PE_STATUS_OK : MIDICI_PE_STATUS_BAD_REQ;           // 200 / 400
+        }
+    }
+    else if (r->set != nullptr)
+    {
+        status = (uint16_t)r->set((const char *)peSetBuf_, total, r->ctx);
+    }
+    else
+    {
+        status = MIDICI_PE_STATUS_RESOURCE_NOT_ALLOWED;                       // 405
+    }
+
+    sendPESetReplyStatus(ci, status);
+}
+
+// Build a PE Get Reply (single chunk): header = {"status":<code>}, body = JSON.
+void UMP_Endpoint::sendPEReply(const MIDICI &ci, uint16_t status, const uint8_t *body, uint16_t bodyLen)
+{
+    char hdr[24];
+    int  hlen = snprintf(hdr, sizeof(hdr), "{\"status\":%u}", (unsigned)status);
+    if (hlen < 0 || hlen >= (int)sizeof(hdr))
+    {
+        return;
+    }
+    const uint8_t *b = (body != nullptr) ? body : (const uint8_t *)"";
+    uint16_t n = CIMessage::sendPEGetReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
+                                           ci.requestId, (uint16_t)hlen, (uint8_t *)hdr,
+                                           /*numChunks*/ 1, /*thisChunk*/ 1, bodyLen, (uint8_t *)b);
+    sendCISysex(ci.umpGroup, peSysex_, n);
+}
+
+// PE Set Reply: status-only header, no body.
+void UMP_Endpoint::sendPESetReplyStatus(const MIDICI &ci, uint16_t status)
+{
+    char hdr[24];
+    int  hlen = snprintf(hdr, sizeof(hdr), "{\"status\":%u}", (unsigned)status);
+    if (hlen < 0 || hlen >= (int)sizeof(hdr))
+    {
+        return;
+    }
+    uint16_t n = CIMessage::sendPESetReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
+                                           ci.requestId, (uint16_t)hlen, (uint8_t *)hdr);
+    sendCISysex(ci.umpGroup, peSysex_, n);
+}
+
+// Foundational resource: DeviceInfo (M2-105). Numeric ids come from device
+// metadata; human names from the endpoint/manufacturer strings; version from the
+// same 4 bytes as the UMP Device Identity — no magic numbers.
+int UMP_Endpoint::buildDeviceInfoJSON(char *out, int cap)
+{
+    int n = snprintf(out, (size_t)cap,
+        "{\"manufacturerId\":[%u,%u,%u],"
+        "\"familyId\":[%u,%u],"
+        "\"modelId\":[%u,%u],"
+        "\"versionId\":[%u,%u,%u,%u],"
+        "\"manufacturer\":\"%s\","
+        "\"model\":\"%s\","
+        "\"version\":\"%u.%u.%u.%u\"}",
+        kmi_id_1, kmi_id_2, kmi_id_3,
+        kmi_family_lsb, kmi_family_msb,
+        getMidiProductId(), PID_MIDI_MSB,
+        SYX_ID_APP_VER1, SYX_ID_APP_VER2, SYX_ID_APP_VER3, SYX_ID_APP_VER4,
+        manufacturerName_, endpointName_,
+        SYX_ID_APP_VER1, SYX_ID_APP_VER2, SYX_ID_APP_VER3, SYX_ID_APP_VER4);
+    return (n < 0 || n >= cap) ? -1 : n;
+}
+
+// Foundational resource: ChannelList (M2-105). One playable channel (kick);
+// channel numbers are 1-based. Title reuses the endpoint/instrument name.
+int UMP_Endpoint::buildChannelListJSON(char *out, int cap)
+{
+    int n = snprintf(out, (size_t)cap, "[{\"title\":\"%s\",\"channel\":1}]", endpointName_);
+    return (n < 0 || n >= cap) ? -1 : n;
+}
+
+// Foundational resource: ResourceList (M2-105) — every resource this device
+// serves: the foundational ones plus each registered product resource, with
+// canSet + an inline JSON Schema (explicit, or auto-derived from a field table).
+int UMP_Endpoint::buildResourceListJSON(char *out, int cap)
+{
+    int n = snprintf(out, (size_t)cap, "[{\"resource\":\"DeviceInfo\"},{\"resource\":\"ChannelList\"}");
+    if (n < 0 || n >= cap) return -1;
+
+    for (uint8_t i = 0; i < peResCount_; i++)
+    {
+        const UMP_PEResource &r = peRes_[i];
+        int m = snprintf(out + n, (size_t)(cap - n), ",{\"resource\":\"%s\"", r.name);
+        if (m < 0 || m >= cap - n) return -1;
+        n += m;
+
+        bool settable = (r.fields != nullptr) ? r.writable : (r.set != nullptr);
+        if (settable)
+        {
+            m = snprintf(out + n, (size_t)(cap - n), ",\"canSet\":\"full\"");
+            if (m < 0 || m >= cap - n) return -1;
+            n += m;
+        }
+
+        // Manufacturer-specific ("X-") resources must carry an inline JSON Schema:
+        // an explicit one if provided, else derived from the declarative fields.
+        if (r.schema != nullptr)
+        {
+            m = snprintf(out + n, (size_t)(cap - n), ",\"schema\":%s", r.schema);
+            if (m < 0 || m >= cap - n) return -1;
+            n += m;
+        }
+        else if (r.fields != nullptr)
+        {
+            m = snprintf(out + n, (size_t)(cap - n), ",\"schema\":");
+            if (m < 0 || m >= cap - n) return -1;
+            n += m;
+            m = buildSchemaFromFields(r.title, r.fields, r.fieldCount, out + n, cap - n);
+            if (m < 0) return -1;
+            n += m;
+        }
+
+        if (n + 1 > cap) return -1;
+        out[n++] = '}';
+    }
+
+    if (n + 2 > cap) return -1;
+    out[n++] = ']';
+    out[n]   = '\0';
+    return n;
 }
 
 #endif // ENABLE_MIDI2

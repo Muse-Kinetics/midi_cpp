@@ -1,3 +1,15 @@
+/*
+  ----------------------------------------------------------------------------
+  File:        MIDI_ump.hpp
+
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
+
+  Portions built on AM_MIDI2.0Lib (Andrew Mee), MIT License.
+  ----------------------------------------------------------------------------
+*/
 /**
  * @file MIDI_ump.hpp
  * @brief Portable USB MIDI 2.0 / UMP Endpoint engine (built on AM_MIDI2.0Lib).
@@ -21,8 +33,10 @@
  *   - onRxBytes(): called from the transport RX path with raw UMP bytes; enqueues.
  *   - poll(): drains inbound UMP through the processor and flushes replies via emit.
  *
- * M2 scope: UMP Stream Endpoint/Function Block Discovery. Channel-voice (M4) and
- * MIDI-CI (M5) callbacks are added later. See .buddy-project/MIDI2_development.md.
+ * Scope: UMP Stream Endpoint/Function Block Discovery, MIDI 2.0 Channel Voice TX,
+ * and MIDI-CI Capability Inquiry — Discovery, Profile Inquiry, and Property
+ * Exchange (foundational resources + a declarative/product-registered resource
+ * table with Get/Set). MIDI 1.0 is unaffected when ENABLE_MIDI2 is undefined.
  */
 #ifndef MIDI_UMP_HPP
 #define MIDI_UMP_HPP
@@ -33,11 +47,19 @@
 #include <cstddef>
 #include <array>
 #include "umpProcessor.h"
+#include "midiCIProcessor.h"   // MIDI-CI (Capability Inquiry) on the Function Block
 
 /// Transport emit callback: send `len` bytes of an already-packed UMP packet
 /// (little-endian words). Return true if accepted/queued, false if the transport
 /// is busy — the engine keeps the remainder and retries on the next poll().
 typedef bool (*UMPEmitFn)(const uint8_t *bytes, uint16_t len);
+
+/// Entropy source for the MIDI-CI MUID. The app supplies a function returning a
+/// fresh 32-bit random value (hardware-seeded); the engine masks it to 28 bits.
+/// Required by Common Rules for MIDI-CI: the MUID must be regenerated each power
+/// cycle and must not repeat across restarts. If unset, the engine falls back to
+/// a *stable* MUID derived from the Product Instance Id (fails that rule — set it).
+typedef uint32_t (*UMPRandFn)(void);
 
 /// UMP Function Block direction (M2-104 §7.1.8).
 enum UMP_FB_Direction : uint8_t
@@ -56,6 +78,61 @@ struct UMP_FunctionBlock
     const char *name;
 };
 
+/// Backing data type of a declarative Property Exchange field.
+enum UMP_PEType : uint8_t
+{
+    PE_U8, PE_U16, PE_U32, PE_I8, PE_I16, PE_I32, PE_FLOAT, PE_BOOL, PE_STR
+};
+
+/// One field of a declarative PE resource. The JSON key lives here and nowhere
+/// else — the engine reads/writes `ptr` (by `type`) for Get/Set and derives the
+/// resource's JSON Schema from this table. For integer types, when `min != max`
+/// the engine clamps incoming Set values to [min,max]. `size` is the buffer
+/// capacity for PE_STR (ignored otherwise). Rows may omit the trailing
+/// min/max/size (they default to 0 = unbounded / n/a).
+struct UMP_PEField
+{
+    const char *name;      ///< JSON key
+    void       *ptr;       ///< backing storage (borrowed)
+    UMP_PEType  type;
+    int32_t     min;       ///< clamp lower bound (min==max -> no clamp)
+    int32_t     max;       ///< clamp upper bound
+    uint16_t    size;      ///< buffer capacity for PE_STR
+};
+
+/// Fired once after a resource's fields are applied on a Set. Return false to
+/// reject the Set (-> status 400). `ctx` is the resource's registered ctx. This
+/// is where a product does RAM-derived recompute / LED refresh / persistence.
+typedef bool (*UMP_PEApplyFn)(void *ctx);
+
+/// Escape-hatch callbacks for irregular resources (arrays, computed strings)
+/// that don't fit the flat field table. Used only when `fields == nullptr`.
+///  - get: write the JSON body into out[0..cap); return length or -1.
+///  - set: consume the JSON body; return a PE status code (200 on success).
+typedef int (*UMP_PEGetFn)(char *out, int cap, void *ctx);
+typedef int (*UMP_PESetFn)(const char *body, int len, void *ctx);
+
+/// A product-specific Property Exchange resource. Products register these; the
+/// engine serves the foundational resources (ResourceList/DeviceInfo/ChannelList)
+/// itself. All pointers are borrowed. Two forms:
+///   1. Declarative (preferred): supply `fields`; the engine auto-serialises Get,
+///      auto-applies Set (when `writable`), and auto-derives the JSON Schema.
+///   2. Escape hatch: leave `fields` null and supply `get`/`set`; then `schema`
+///      must be provided for manufacturer-specific ("X-") resources.
+struct UMP_PEResource
+{
+    const char        *name;        ///< resource name ("X-TriggerSettings")
+    const char        *title;       ///< human title (used for the auto-schema)
+    const UMP_PEField *fields;      ///< declarative table, or nullptr for escape hatch
+    uint8_t            fieldCount;
+    bool               writable;    ///< field-based + writable -> canSet:"full"
+    UMP_PEApplyFn      onApplied;   ///< optional post-Set hook (nullptr ok)
+    void              *ctx;         ///< passed to onApplied / get / set
+    UMP_PEGetFn        get;         ///< escape-hatch Get (used iff fields==nullptr)
+    UMP_PESetFn        set;         ///< escape-hatch Set (used iff fields==nullptr)
+    const char        *schema;      ///< explicit schema; else derived from fields
+};
+
 class UMP_Endpoint
 {
 public:
@@ -66,12 +143,24 @@ public:
     void setEndpointName(const char *name)      { endpointName_ = name; }
     void setProductInstanceId(const char *pid)  { productInstanceId_ = pid; }
 
+    /// Human-readable manufacturer name for the Property Exchange DeviceInfo
+    /// resource (the numeric manufacturerId comes from device metadata). Borrowed.
+    void setManufacturerName(const char *name)  { manufacturerName_ = name; }
+
+    /// Register product-specific Property Exchange resources (array borrowed).
+    /// They are added to ResourceList automatically and served on Get.
+    void setPEResources(const UMP_PEResource *res, uint8_t count)
+    { peRes_ = res; peResCount_ = count; }
+
     /// Declare the endpoint's Function Blocks (array borrowed, not copied).
     void setFunctionBlocks(const UMP_FunctionBlock *blocks, uint8_t count)
     { fbs_ = blocks; fbCount_ = count; }
 
     /// Advertise Function Blocks as static (won't change after discovery).
     void setStaticFunctionBlocks(bool isStatic) { fbStatic_ = isStatic; }
+
+    /// Supply a hardware entropy source for the MIDI-CI MUID (see UMPRandFn).
+    void setRandomSource(UMPRandFn fn) { randFn_ = fn; }
 
     /// Wire the transport and register the UMP Stream callbacks.
     void init(UMPEmitFn emit, uint16_t maxPacketSize);
@@ -99,6 +188,28 @@ private:
     void onFunctionBlock(uint8_t fbIdx, uint8_t filter);
     void onStreamConfigRequest(uint8_t protocol, bool jrrx, bool jrtx);
 
+    // ---- MIDI-CI (M5) — Capability Inquiry, generic + Profile-pluggable ------
+    void     initCI();                                    ///< wire the CI processor + callbacks
+    void     ensureMUID();                                ///< lazily generate the MUID on first use
+    uint32_t makeMUID() const;                            ///< draw a fresh 28-bit MUID (random if seeded)
+    bool     ciCheckMUID(uint8_t group, uint32_t muid);   ///< is this MUID addressed to us?
+    void     routeSysEx7(const umpData &mess);            ///< UMP SysEx7 -> CI processor (form-aware)
+    void     onCIDiscovery(const MIDICI &ci);             ///< Discovery -> Discovery Reply
+    void     onCIInvalidateMUID(uint32_t terminateMuid);  ///< drop our MUID -> regenerate next time
+    void     onCIProfileInquiry(const MIDICI &ci);        ///< Profile Inquiry -> Profile List (empty pre-M6)
+    void     onCIPECapabilities(const MIDICI &ci);        ///< PE Capabilities -> Reply
+    // ---- Property Exchange (M5 step 5) ----
+    void     onCIPEGetInquiry(const MIDICI &ci, const char *header, uint16_t len); ///< PE Get -> resource dispatch
+    void     onCIPESetInquiry(const MIDICI &ci, const char *header, uint16_t headerLen,
+                              const uint8_t *body, uint16_t bodyLen, bool lastByteOfSet); ///< PE Set (reassemble + apply)
+    void     sendPEReply(const MIDICI &ci, uint16_t status, const uint8_t *body, uint16_t bodyLen); ///< PE Get Reply (1 chunk)
+    void     sendPESetReplyStatus(const MIDICI &ci, uint16_t status); ///< PE Set Reply (status header only)
+    const UMP_PEResource *findPEResource(const char *name, uint16_t nameLen); ///< product-table lookup
+    int      buildDeviceInfoJSON(char *out, int cap);     ///< foundational resource: DeviceInfo
+    int      buildChannelListJSON(char *out, int cap);    ///< foundational resource: ChannelList
+    int      buildResourceListJSON(char *out, int cap);   ///< foundational resource: ResourceList (+ product)
+    void     sendCISysex(uint8_t group, const uint8_t *body, uint16_t len); ///< pack CI bytes as SysEx7 UMP
+
     void queueUMP(const uint32_t *words, uint8_t nWords);
     template <std::size_t N>
     void queueUMP(const std::array<uint32_t, N> &m, uint8_t nWords) { queueUMP(m.data(), nWords); }
@@ -107,12 +218,32 @@ private:
     void sendFunctionBlockInfo(uint8_t fbIdx);
     void sendFunctionBlockName(uint8_t fbIdx, const char *text, uint8_t len);
 
-    umpProcessor ump_;
-    UMPEmitFn    emit_          = nullptr;
-    uint16_t     maxPacketSize_ = 0;
+    umpProcessor    ump_;
+    midiCIProcessor ci_;
+    uint32_t        localMUID_    = 0;      ///< this Function Block's MUID (valid when muidValid_)
+    bool            muidValid_    = false;  ///< MUID generated this session?
+    bool            ciInProgress_ = false;  ///< a MIDI-CI SysEx7 is mid-reassembly
+    UMPRandFn       randFn_        = nullptr;
+    UMPEmitFn       emit_          = nullptr;
+    uint16_t        maxPacketSize_ = 0;
 
     const char *endpointName_      = "";
     const char *productInstanceId_ = "";
+    const char *manufacturerName_  = "";
+
+    const UMP_PEResource *peRes_     = nullptr;   ///< product PE resources (borrowed)
+    uint8_t               peResCount_ = 0;
+
+    // Property Exchange scratch (single-chunk). peJson_ builds a resource body
+    // (or the ResourceList, which now carries auto-derived schemas); peSysex_ is
+    // the assembled CI SysEx; peSetBuf_ reassembles an inbound Set body across
+    // the CI processor's <=256-byte slices. Sized so the multi-field settable
+    // resources + their ResourceList schemas fit one message (advertised max
+    // SysEx below). Larger payloads would need real PE chunking (future).
+    char        peJson_[1280];
+    uint8_t     peSysex_[1280];
+    uint8_t     peSetBuf_[1024];
+    uint16_t    peSetLen_ = 0;
 
     const UMP_FunctionBlock *fbs_     = nullptr;
     uint8_t                  fbCount_ = 0;
@@ -127,8 +258,12 @@ private:
     volatile uint16_t rxHead_ = 0;
     volatile uint16_t rxTail_ = 0;
 
-    // Outbound UMP byte accumulator (whole messages; flushed in poll()).
-    static const uint16_t TX_BUF_BYTES = 256;
+    // Outbound UMP byte accumulator (whole messages; flushed in poll()). Must
+    // hold the largest single reply before flush: a max PE chunk (512-byte CI
+    // SysEx) packs to ~683 SysEx7 UMP bytes (8 bytes per 6 payload bytes), so
+    // this is sized to 1 KB. flushTx() drains it across poll() passes as the USB
+    // TX ring frees, but the whole message must fit here first.
+    static const uint16_t TX_BUF_BYTES = 2048;
     uint8_t  txBuf_[TX_BUF_BYTES];
     uint16_t txLen_ = 0;
 };

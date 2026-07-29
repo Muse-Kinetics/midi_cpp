@@ -1,0 +1,33 @@
+/*
+  ----------------------------------------------------------------------------
+  File:        midi2_resources.hpp.template
+
+  Description: Example product Property Exchange resource table for the MIDI_CPP
+  UMP_Endpoint. TEMPLATE: copy into your application, remove ".template", and
+  edit the table in the .cpp. Keeps product-specific resources out of the
+  portable library — midi2.cpp fetches this table and calls setPEResources().
+
+  Copyright (c) 2026 KMI Music, Inc.
+  SPDX-License-Identifier: MIT
+
+  Author: Eric Bateman <eric@musekinetics.com>
+  ----------------------------------------------------------------------------
+*/
+#ifndef MIDI2_RESOURCES_HPP
+#define MIDI2_RESOURCES_HPP
+
+#ifdef ENABLE_MIDI2
+
+#include <cstdint>
+#include "MIDI_ump.hpp"   // UMP_PEResource
+
+namespace midi2
+{
+    /// Return this product's Property Exchange resource table (borrowed, static).
+    /// *countOut receives the number of entries.
+    const UMP_PEResource *peResources(uint8_t *countOut);
+}
+
+#endif // ENABLE_MIDI2
+
+#endif // MIDI2_RESOURCES_HPP
