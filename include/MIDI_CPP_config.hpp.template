@@ -34,6 +34,7 @@
 #define SYX_ID_APP_VER1 SYS_FW_VERSION_MAJOR // main.h
 #define SYX_ID_APP_VER2 SYS_FW_VERSION_MINOR
 #define SYX_ID_APP_VER3 SYS_FW_VERSION_PATCH
+#define SYX_ID_APP_VER4 SYS_FW_VERSION_DEV   // 4th byte of the UMP Device Identity version
 
 
 // Status and error codes - replace with the equivalent enums that your application uses
