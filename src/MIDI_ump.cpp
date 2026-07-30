@@ -122,6 +122,14 @@ namespace
         return strlen(lit) == (size_t)nameLen && memcmp(name, lit, nameLen) == 0;
     }
 
+    // Copy a 5-byte Profile ID into the std::array the AM_MIDI2 builders expect.
+    std::array<uint8_t, 5> idArray(const uint8_t id[5])
+    {
+        std::array<uint8_t, 5> a{};
+        for (uint8_t i = 0; i < 5; i++) a[i] = id[i];
+        return a;
+    }
+
     // ---- Generic Restricted-JSON value readers (product-agnostic) -----------
     // Locate `"key"` then return a pointer just past the following ':'. nullptr
     // if the key is absent. Skips spaces. Not a full JSON parser — sufficient for
@@ -671,6 +679,13 @@ void UMP_Endpoint::initCI()
     ci_.setRecvInvalidateMUID([this](MIDICI, uint32_t terminateMuid) { onCIInvalidateMUID(terminateMuid); });
 
     ci_.setRecvProfileInquiry([this](MIDICI ci) { onCIProfileInquiry(ci); });
+    ci_.setRecvProfileOn([this](MIDICI ci, std::array<uint8_t, 5> p, uint8_t ch) { onCIProfileOn(ci, p.data(), ch); });
+    ci_.setRecvProfileOff([this](MIDICI ci, std::array<uint8_t, 5> p) { onCIProfileOff(ci, p.data()); });
+    ci_.setRecvProfileDetailsInquiry([this](MIDICI ci, std::array<uint8_t, 5> p, uint8_t target)
+                                     { onCIProfileDetailsInquiry(ci, p.data(), target); });
+    ci_.setRecvProfileSpecificData([this](MIDICI ci, std::array<uint8_t, 5> p, uint16_t len, uint8_t *d,
+                                          uint16_t part, bool last)
+                                   { onCIProfileSpecificData(ci, p.data(), d, len, part, last); });
 
     ci_.setPECapabilities([this](MIDICI ci, uint8_t, uint8_t, uint8_t) { onCIPECapabilities(ci); });
 
@@ -780,23 +795,134 @@ void UMP_Endpoint::onCIDiscovery(const MIDICI &ci, uint16_t peerMaxSysex)
     std::array<uint8_t, 4> version  = { SYX_ID_APP_VER1, SYX_ID_APP_VER2,
                                         SYX_ID_APP_VER3, SYX_ID_APP_VER4 };
 
+    // Advertise Profile Configuration only when >=1 Profile is registered (Common
+    // Rules: a Profile-Inquiry reply must list >=1 Profile to claim the category).
+    uint8_t categories = CI_CAT_PROPERTY;
+    if (profileCount_ > 0) categories |= CI_CAT_PROFILE;
+
     uint8_t  sx[64];
     uint16_t len = CIMessage::sendDiscoveryReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                  manuId, familyId, modelId, version,
-                                                 CI_CATEGORIES, CI_MAX_SYSEX,
+                                                 categories, CI_MAX_SYSEX,
                                                  CI_OUTPUT_PATH, CI_FB_INDEX);
     sendCISysex(ci.umpGroup, sx, len);
 }
 
-// Profile Inquiry -> Profile List Response. No profiles are registered until the
-// Drums Profile is added in M6, so both lists are empty for now.
+// ---- MIDI-CI Profile Configuration (generic Common-Rules envelope) ---------
+// The library runs this state machine for any registered profile; the product's
+// UMP_Profile callbacks supply the profile-specific behaviour and payloads.
+
+int8_t UMP_Endpoint::profileIndex(const uint8_t id[5]) const
+{
+    for (uint8_t i = 0; i < profileCount_; i++)
+    {
+        if (memcmp(profiles_[i].id, id, 5) == 0) return (int8_t)i;
+    }
+    return -1;
+}
+
+// Profile Inquiry -> Profile List Response, at the inquiry's address. Only the
+// profiles that live at that address (§2.3) are listed, split into currently-
+// enabled and currently-disabled from the registered table + engine state.
 void UMP_Endpoint::onCIProfileInquiry(const MIDICI &ci)
 {
-    static uint8_t none[1] = { 0 };
-    uint8_t  sx[32];
+    uint8_t enabled[5 * UMP_MAX_PROFILES];
+    uint8_t disabled[5 * UMP_MAX_PROFILES];
+    uint8_t ne = 0, nd = 0;
+    for (uint8_t i = 0; i < profileCount_ && i < UMP_MAX_PROFILES; i++)
+    {
+        if (profiles_[i].address != ci.deviceId) continue;   // report each profile only at its address
+        if (profileChannels_[i] > 0) { memcpy(enabled + ne * 5, profiles_[i].id, 5); ne++; }
+        else                         { memcpy(disabled + nd * 5, profiles_[i].id, 5); nd++; }
+    }
+    uint8_t  sx[32 + 5 * UMP_MAX_PROFILES * 2];
     uint16_t len = CIMessage::sendProfileListResponse(sx, ci.ciVer, localMUID_, ci.remoteMUID,
-                                                      FUNCTION_BLOCK, 0, none, 0, none);
+                                                      ci.deviceId, ne, enabled, nd, disabled);
     sendCISysex(ci.umpGroup, sx, len);
+}
+
+// Set Profile On -> enable via the product callback, then notify Enabled/Disabled.
+void UMP_Endpoint::onCIProfileOn(const MIDICI &ci, const uint8_t id[5], uint8_t numChannels)
+{
+    int8_t idx = profileIndex(id);
+    if (idx < 0) return;   // unknown profile
+
+    uint8_t ch = numChannels;
+    if (profiles_[idx].onEnable != nullptr)
+    {
+        ch = profiles_[idx].onEnable(numChannels, profiles_[idx].ctx);
+    }
+    profileChannels_[idx] = ch;
+
+    uint8_t  sx[32];
+    uint16_t len = (ch > 0)
+        ? CIMessage::sendProfileEnabled(sx, ci.ciVer, localMUID_, ci.remoteMUID, ci.deviceId, idArray(id), ch)
+        : CIMessage::sendProfileDisabled(sx, ci.ciVer, localMUID_, ci.remoteMUID, ci.deviceId, idArray(id), 0);
+    sendCISysex(ci.umpGroup, sx, len);
+}
+
+// Set Profile Off -> disable via the product callback, then notify Disabled.
+void UMP_Endpoint::onCIProfileOff(const MIDICI &ci, const uint8_t id[5])
+{
+    int8_t idx = profileIndex(id);
+    if (idx < 0) return;
+
+    if (profiles_[idx].onDisable != nullptr)
+    {
+        profiles_[idx].onDisable(profiles_[idx].ctx);
+    }
+    profileChannels_[idx] = 0;
+
+    uint8_t  sx[32];
+    uint16_t len = CIMessage::sendProfileDisabled(sx, ci.ciVer, localMUID_, ci.remoteMUID,
+                                                  ci.deviceId, idArray(id), 0);
+    sendCISysex(ci.umpGroup, sx, len);
+}
+
+// Profile Details Inquiry -> Reply. The reply payload is profile-specific and
+// supplied opaquely by the product callback (empty if unsupported).
+void UMP_Endpoint::onCIProfileDetailsInquiry(const MIDICI &ci, const uint8_t id[5], uint8_t target)
+{
+    int8_t idx = profileIndex(id);
+    if (idx < 0) return;
+
+    uint8_t data[64];
+    int     dl = 0;
+    if (profiles_[idx].onDetailsInquiry != nullptr)
+    {
+        dl = profiles_[idx].onDetailsInquiry(target, data, (int)sizeof(data), profiles_[idx].ctx);
+    }
+    if (dl < 0) dl = 0;
+
+    uint8_t  sx[96];
+    uint16_t len = CIMessage::sendProfileDetailsReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
+                                                      ci.deviceId, idArray(id), target, (uint16_t)dl, data);
+    sendCISysex(ci.umpGroup, sx, len);
+}
+
+// Profile Specific Data -> hand the opaque payload to the product callback, which
+// responds (0..N times) via replyProfileData(). The library does not interpret it.
+void UMP_Endpoint::onCIProfileSpecificData(const MIDICI &ci, const uint8_t id[5],
+                                           const uint8_t *data, uint16_t len, uint16_t part, bool last)
+{
+    int8_t idx = profileIndex(id);
+    if (idx < 0 || profiles_[idx].onSpecificData == nullptr) return;
+
+    memcpy(curProfileId_, id, 5);
+    curProfileCiVer_      = ci.ciVer;
+    curProfileRemoteMUID_ = ci.remoteMUID;
+    curProfileGroup_      = ci.umpGroup;
+    curProfileDeviceId_   = ci.deviceId;
+    profiles_[idx].onSpecificData(this, data, len, part, last, profiles_[idx].ctx);
+}
+
+// Send a Profile Specific Data reply for the in-flight profile transaction.
+void UMP_Endpoint::replyProfileData(const uint8_t *data, uint16_t len)
+{
+    uint16_t n = CIMessage::sendProfileSpecificData(peSysex_, curProfileCiVer_, localMUID_,
+                                                    curProfileRemoteMUID_, curProfileDeviceId_,
+                                                    idArray(curProfileId_), len, (uint8_t *)data);
+    sendCISysex(curProfileGroup_, peSysex_, n);
 }
 
 // PE Capabilities Inquiry -> Reply (handshake). Advertises how many simultaneous

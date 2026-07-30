@@ -17,6 +17,7 @@
 
 #include "midi2.hpp"
 #include "midi2_resources.hpp"   // product Property Exchange resource table
+#include "midi2_profiles.hpp"    // product MIDI-CI Profile table (optional)
 #include "MIDI_ump.hpp"          // UMP_Endpoint (portable engine in MIDI_CPP)
 
 // TODO: include your transport + MCU headers, e.g.:
@@ -111,6 +112,12 @@ void init()
     uint8_t peCount = 0;
     const UMP_PEResource *peRes = peResources(&peCount);   // product PE table (midi2_resources.cpp)
     endpoint.setPEResources(peRes, peCount);
+
+    // Optional: register the product's MIDI-CI Profiles (midi2_profiles.cpp).
+    // Advertising Profile Configuration turns on automatically when count > 0.
+    uint8_t profileCount = 0;
+    const UMP_Profile *profs = profiles(&profileCount);    // product Profile table (midi2_profiles.cpp)
+    endpoint.setProfiles(profs, profileCount);
 
     endpoint.setRandomSource(hwRandom);                    // MIDI-CI MUID entropy
     endpoint.setFunctionBlocks(kFunctionBlocks, kFunctionBlockCount);

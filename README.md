@@ -23,12 +23,19 @@ MIDI 2.0 / Universal MIDI Packet engine built on
 
 * UMP Stream Endpoint / Function Block Discovery
 * MIDI 2.0 Channel Voice TX (MT 0x4), including a MIDI 1.0 → UMP bridge
-* MIDI-CI Capability Inquiry: Discovery (random per-boot MUID), Profile Inquiry,
-  and Property Exchange
+* MIDI-CI Capability Inquiry: Discovery (random per-boot MUID), Profile
+  Configuration, and Property Exchange
 * Property Exchange foundational resources (ResourceList / DeviceInfo /
   ChannelList) plus a **declarative, product-registered resource table** with
   Get/Set — map JSON keys straight onto backing variables and the engine
   auto-serialises Get, auto-applies Set, and auto-derives the JSON Schema.
+* MIDI-CI **Profile Configuration** via a **product-registered profile table**:
+  the engine runs the generic Common-Rules envelope (Profile Inquiry/list, Set
+  On/Off with Enabled/Disabled notifications, Profile Details Inquiry, and
+  opaque Profile-Specific-Data routing) for any profile, while the profile's
+  5-byte ID, address (channel / group / function block), and profile-specific
+  messaging stay in the application. Profile Configuration is advertised in
+  Discovery automatically when at least one profile is registered.
 
 It is entirely compiled out unless `ENABLE_MIDI2` is defined, so MIDI 1.0
 behaviour is unchanged when the flag is off. AM_MIDI2.0Lib is an **optional**
@@ -39,11 +46,13 @@ dependency finder honours the `#ifdef ENABLE_MIDI2` guards (plain `chain` mode
 text-scans includes and would demand AM_MIDI2.0Lib even with the flag off).
 
 The application supplies the transport, MCU serial/entropy, identity strings, and
-its Property Exchange resource table. Copy-and-adapt templates (`.template`,
-mirroring the `MIDI_CPP_config.hpp.template` pattern — copy into your app and drop
-the suffix) are provided for the application glue:
-`include/midi2.hpp.template`, `src/midi2.cpp.template`,
-`include/midi2_resources.hpp.template`, and `src/midi2_resources.cpp.template`.
+its Property Exchange resource table, and (optionally) its MIDI-CI Profile table.
+Copy-and-adapt templates (`.template`, mirroring the `MIDI_CPP_config.hpp.template`
+pattern — copy into your app and drop the suffix) are provided for the application
+glue: `include/midi2.hpp.template`, `src/midi2.cpp.template`,
+`include/midi2_resources.hpp.template`, `src/midi2_resources.cpp.template`,
+`include/midi2_profiles.hpp.template`, and `src/midi2_profiles.cpp.template` (the
+last pair only if the product implements MIDI-CI Profiles).
 
 ### Products that use this library ###
 

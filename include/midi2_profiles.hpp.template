@@ -1,0 +1,43 @@
+/*
+  ----------------------------------------------------------------------------
+  File:        midi2_profiles.hpp   (copy-and-adapt template)
+
+  Copyright (c) 2026 Your Company
+  SPDX-License-Identifier: MIT
+  ----------------------------------------------------------------------------
+*/
+/**
+ * @file midi2_profiles.hpp
+ * @brief Product-specific MIDI-CI Profile table (kept in your application).
+ *
+ * The portable MIDI_CPP engine implements the generic Common-Rules Profile
+ * Configuration envelope (Profile Inquiry/list, Set On/Off, Enabled/Disabled
+ * notifications, Profile Details Inquiry, and Profile-Specific-Data routing) for
+ * ANY profile. This file supplies the product's Profiles — their 5-byte IDs,
+ * addresses, and profile-specific behaviour/messaging — which stay in your app.
+ * midi2.cpp fetches this table and calls setProfiles(). If a product has no
+ * Profiles, omit this file and the setProfiles() call.
+ *
+ * Compiles out unless ENABLE_MIDI2 is defined.
+ *
+ * To use: copy this file into your app, remove the ".template" suffix, and
+ * implement the profiles in midi2_profiles.cpp.
+ */
+#ifndef MIDI2_PROFILES_HPP
+#define MIDI2_PROFILES_HPP
+
+#ifdef ENABLE_MIDI2
+
+#include <cstdint>
+#include "MIDI_ump.hpp"   // UMP_Profile
+
+namespace midi2
+{
+    /// Return this product's MIDI-CI Profile table (borrowed, static storage).
+    /// *countOut receives the number of entries (0 if none).
+    const UMP_Profile *profiles(uint8_t *countOut);
+}
+
+#endif // ENABLE_MIDI2
+
+#endif // MIDI2_PROFILES_HPP

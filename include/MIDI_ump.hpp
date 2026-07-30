@@ -133,6 +133,38 @@ struct UMP_PEResource
     const char        *schema;      ///< explicit schema; else derived from fields
 };
 
+class UMP_Endpoint;   // forward declaration for the profile callbacks below
+
+/// A MIDI-CI Profile the device supports. The library implements the generic
+/// Common-Rules-for-Profiles envelope (Profile Inquiry/list, Set Profile On/Off,
+/// Enabled/Disabled notifications, and routing of Profile Details Inquiry and
+/// Profile Specific Data); the product supplies the 5-byte Profile ID and the
+/// profile-specific behaviour via these callbacks. The library never interprets a
+/// profile's payload — Details/Specific-Data bytes pass through opaquely. All
+/// callbacks are optional (nullptr): a profile with none still enables/disables
+/// and appears in the Profile Inquiry list. Registered array is borrowed.
+struct UMP_Profile
+{
+    uint8_t  id[5];                                       ///< 5-byte Profile ID
+    /// Device ID where this profile lives (MIDI-CI Common Rules §2.3): a MIDI
+    /// channel 0x00-0x0F (single/multi-channel profile), 0x7E (group), or 0x7F
+    /// (function block). The engine reports/enables the profile at this address
+    /// and only lists it in a Profile Inquiry addressed to it.
+    uint8_t  address;
+    /// Enable on `numChannels`; return channels actually enabled (<= requested,
+    /// 0 = refuse). If null, enables with the requested channel count.
+    uint8_t (*onEnable)(uint8_t numChannels, void *ctx);
+    void    (*onDisable)(void *ctx);
+    /// Profile Details Inquiry: write reply bytes for `target` into out[0..cap);
+    /// return length, or -1 if the target is unsupported (empty reply sent).
+    int     (*onDetailsInquiry)(uint8_t target, uint8_t *out, int cap, void *ctx);
+    /// Profile Specific Data: opaque inbound payload. Respond (0..N times) by
+    /// calling ep->replyProfileData(). `part`/`last` reflect chunked inbound data.
+    void    (*onSpecificData)(UMP_Endpoint *ep, const uint8_t *data, uint16_t len,
+                              uint16_t part, bool last, void *ctx);
+    void    *ctx;                                         ///< passed back to callbacks
+};
+
 class UMP_Endpoint
 {
 public:
@@ -151,6 +183,15 @@ public:
     /// They are added to ResourceList automatically and served on Get.
     void setPEResources(const UMP_PEResource *res, uint8_t count)
     { peRes_ = res; peResCount_ = count; }
+
+    /// Register the MIDI-CI Profiles this device supports (array borrowed). The
+    /// Profile Configuration category is advertised in Discovery when count > 0.
+    void setProfiles(const UMP_Profile *profiles, uint8_t count)
+    { profiles_ = profiles; profileCount_ = count; }
+
+    /// Send a Profile Specific Data reply for the profile currently being handled.
+    /// Valid only from within a UMP_Profile::onSpecificData callback.
+    void replyProfileData(const uint8_t *data, uint16_t len);
 
     /// Declare the endpoint's Function Blocks (array borrowed, not copied).
     void setFunctionBlocks(const UMP_FunctionBlock *blocks, uint8_t count)
@@ -196,7 +237,14 @@ private:
     void     routeSysEx7(const umpData &mess);            ///< UMP SysEx7 -> CI processor (form-aware)
     void     onCIDiscovery(const MIDICI &ci, uint16_t peerMaxSysex); ///< Discovery -> Discovery Reply
     void     onCIInvalidateMUID(uint32_t terminateMuid);  ///< drop our MUID -> regenerate next time
-    void     onCIProfileInquiry(const MIDICI &ci);        ///< Profile Inquiry -> Profile List (empty pre-M6)
+    // ---- MIDI-CI Profile Configuration (generic Common-Rules envelope) -------
+    void     onCIProfileInquiry(const MIDICI &ci);        ///< Profile Inquiry -> registered-profile list
+    void     onCIProfileOn(const MIDICI &ci, const uint8_t id[5], uint8_t numChannels);
+    void     onCIProfileOff(const MIDICI &ci, const uint8_t id[5]);
+    void     onCIProfileDetailsInquiry(const MIDICI &ci, const uint8_t id[5], uint8_t target);
+    void     onCIProfileSpecificData(const MIDICI &ci, const uint8_t id[5],
+                                     const uint8_t *data, uint16_t len, uint16_t part, bool last);
+    int8_t   profileIndex(const uint8_t id[5]) const;     ///< registered index, or -1
     void     onCIPECapabilities(const MIDICI &ci);        ///< PE Capabilities -> Reply
     // ---- Property Exchange (M5 step 5) ----
     void     onCIPEGetInquiry(const MIDICI &ci, const char *header, uint16_t len); ///< PE Get -> resource dispatch
@@ -234,6 +282,18 @@ private:
 
     const UMP_PEResource *peRes_     = nullptr;   ///< product PE resources (borrowed)
     uint8_t               peResCount_ = 0;
+
+    // ---- MIDI-CI Profiles (borrowed table + engine-managed enabled state) ----
+    static const uint8_t  UMP_MAX_PROFILES = 4;
+    const UMP_Profile    *profiles_     = nullptr;
+    uint8_t               profileCount_ = 0;
+    uint8_t               profileChannels_[UMP_MAX_PROFILES] = { 0 }; ///< 0 = disabled, else channels
+    // "Current" profile context for replyProfileData(), set during a Specific-Data callback.
+    uint8_t               curProfileId_[5]      = { 0 };
+    uint8_t               curProfileCiVer_      = 2;
+    uint32_t              curProfileRemoteMUID_ = 0;
+    uint8_t               curProfileGroup_      = 0;
+    uint8_t               curProfileDeviceId_   = 0x7F;  ///< Device ID (address) of the in-flight profile transaction
 
     // Property Exchange scratch (single-chunk). peJson_ builds a resource body
     // (or the ResourceList, which now carries auto-derived schemas); peSysex_ is

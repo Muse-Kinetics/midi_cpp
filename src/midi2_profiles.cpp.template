@@ -1,0 +1,99 @@
+/*
+  ----------------------------------------------------------------------------
+  File:        midi2_profiles.cpp   (copy-and-adapt template)
+
+  Copyright (c) 2026 Your Company
+  SPDX-License-Identifier: MIT
+  ----------------------------------------------------------------------------
+*/
+/**
+ * @file midi2_profiles.cpp
+ * @brief Product MIDI-CI Profiles for your device (see midi2_profiles.hpp).
+ *
+ * The generic Common-Rules Profile Configuration envelope lives in MIDI_CPP; the
+ * profile-specific behaviour and messaging live here, in your application. This
+ * file registers a Profile and handles its configuration (enable/disable,
+ * details, profile-specific data). Compiles out unless ENABLE_MIDI2 is defined.
+ *
+ * Profile addressing (Common Rules for MIDI-CI Profiles, §2.3): set each
+ * profile's `address` to where it lives —
+ *   0x00-0x0F : a MIDI Channel (Single- or Multi-Channel Profile)
+ *   0x7E      : the Group
+ *   0x7F      : the Function Block
+ * The engine reports/enables the profile at that address and only lists it in a
+ * Profile Inquiry addressed to it. Use the address the profile's own spec
+ * defines, not merely where it is convenient to attach.
+ */
+#ifdef ENABLE_MIDI2
+
+#include "midi2_profiles.hpp"
+
+namespace midi2
+{
+namespace
+{
+    // Example Profile ID (5 bytes). Replace with your profile's ID.
+    //   Byte 1: 0x7E Standard-Defined, or a manufacturer SysEx ID for a
+    //           manufacturer-specific profile.
+    //   Bytes 2-4: profile number / version (per the profile spec).
+    //   Byte 5: level.
+    constexpr uint8_t EXAMPLE_PROFILE_ID[5] = { 0x7E, 0x00, 0x00, 0x01, 0x01 };
+
+    // Address where this profile lives (see file header). 0x00 = MIDI channel 1.
+    constexpr uint8_t EXAMPLE_PROFILE_ADDRESS = 0x00;
+
+    bool    exampleEnabled     = false;
+    uint8_t exampleNumChannels = 0;
+
+    // Set Profile On: enable and return the number of channels actually enabled
+    // (<= numChannels requested; return 0 to refuse).
+    uint8_t exampleOnEnable(uint8_t numChannels, void * /*ctx*/)
+    {
+        (void)numChannels;
+        exampleEnabled     = true;
+        exampleNumChannels = 1;
+        return exampleNumChannels;
+    }
+
+    void exampleOnDisable(void * /*ctx*/)
+    {
+        exampleEnabled     = false;
+        exampleNumChannels = 0;
+    }
+
+    // Profile Details Inquiry: write up to `cap` bytes of profile-specific detail
+    // for `target` into `out`; return the number of bytes written (0 = none).
+    int exampleOnDetailsInquiry(uint8_t /*target*/, uint8_t * /*out*/, int /*cap*/, void * /*ctx*/)
+    {
+        return 0;
+    }
+
+    // Profile Specific Data: the profile's own messaging. `data`/`len` is one
+    // (possibly partial) inbound message; reassemble across parts using
+    // `part`/`last` if needed. Respond via ep->replyProfileData(bytes, len),
+    // which addresses the reply back to the in-flight transaction.
+    void exampleOnSpecificData(UMP_Endpoint * /*ep*/, const uint8_t * /*data*/, uint16_t /*len*/,
+                               uint16_t /*part*/, bool /*last*/, void * /*ctx*/)
+    {
+        // TODO: implement per your profile spec.
+    }
+
+    const UMP_Profile kProfiles[] = {
+        { { EXAMPLE_PROFILE_ID[0], EXAMPLE_PROFILE_ID[1], EXAMPLE_PROFILE_ID[2],
+            EXAMPLE_PROFILE_ID[3], EXAMPLE_PROFILE_ID[4] },
+          EXAMPLE_PROFILE_ADDRESS,
+          exampleOnEnable, exampleOnDisable, exampleOnDetailsInquiry, exampleOnSpecificData,
+          /*ctx*/ nullptr },
+    };
+    constexpr uint8_t kProfileCount = sizeof(kProfiles) / sizeof(kProfiles[0]);
+} // anonymous namespace
+
+const UMP_Profile *profiles(uint8_t *countOut)
+{
+    *countOut = kProfileCount;
+    return kProfiles;
+}
+
+} // namespace midi2
+
+#endif // ENABLE_MIDI2
