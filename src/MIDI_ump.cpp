@@ -419,21 +419,35 @@ void UMP_Endpoint::queueUMP(const uint32_t *words, uint8_t nWords)
 
 // ---- MIDI 2.0 Channel Voice TX (MT 0x4) ------------------------------------
 
-void UMP_Endpoint::sendNoteOn(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity)
+void UMP_Endpoint::sendNoteOn(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity,
+                             uint8_t attrType, uint16_t attrData)
 {
-    std::array<uint32_t, 2> m = UMPMessage::mt4NoteOn(group, channel, note, velocity, 0, 0);
+    std::array<uint32_t, 2> m = UMPMessage::mt4NoteOn(group, channel, note, velocity, attrType, attrData);
     queueUMP(m.data(), 2);
 }
 
-void UMP_Endpoint::sendNoteOff(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity)
+void UMP_Endpoint::sendNoteOff(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity,
+                              uint8_t attrType, uint16_t attrData)
 {
-    std::array<uint32_t, 2> m = UMPMessage::mt4NoteOff(group, channel, note, velocity, 0, 0);
+    std::array<uint32_t, 2> m = UMPMessage::mt4NoteOff(group, channel, note, velocity, attrType, attrData);
     queueUMP(m.data(), 2);
 }
 
 void UMP_Endpoint::sendPolyPressure(uint8_t group, uint8_t channel, uint8_t note, uint32_t pressure)
 {
     std::array<uint32_t, 2> m = UMPMessage::mt4CPolyPressure(group, channel, note, pressure);
+    queueUMP(m.data(), 2);
+}
+
+void UMP_Endpoint::sendPerNoteRPN(uint8_t group, uint8_t channel, uint8_t note, uint8_t index, uint32_t value)
+{
+    std::array<uint32_t, 2> m = UMPMessage::mt4PerNoteRPN(group, channel, note, index, value);
+    queueUMP(m.data(), 2);
+}
+
+void UMP_Endpoint::sendPerNotePitchBend(uint8_t group, uint8_t channel, uint8_t note, uint32_t value)
+{
+    std::array<uint32_t, 2> m = UMPMessage::mt4PerNotePitchBend(group, channel, note, value);
     queueUMP(m.data(), 2);
 }
 
@@ -1127,6 +1141,10 @@ int UMP_Endpoint::buildDeviceInfoJSON(char *out, int cap)
         "\"modelId\":[%u,%u],"
         "\"versionId\":[%u,%u,%u,%u],"
         "\"manufacturer\":\"%s\","
+        // M2-105 DeviceInfo requires a human-readable "family" name (minLength 1),
+        // distinct from familyId. Placeholder "0,0" until a product family name is
+        // assigned (familyId is currently 0,0).
+        "\"family\":\"0,0\","
         "\"model\":\"%s\","
         "\"version\":\"%u.%u.%u.%u\"}",
         kmi_id_1, kmi_id_2, kmi_id_3,

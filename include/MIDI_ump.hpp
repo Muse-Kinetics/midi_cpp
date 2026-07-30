@@ -216,9 +216,25 @@ public:
     // ---- MIDI 2.0 Channel Voice TX (MT 0x4). Values are full MIDI 2.0 -------
     //      resolution (16-bit velocity, 32-bit controllers). Queued like any
     //      other outbound UMP and flushed by poll().
-    void sendNoteOn(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity);
-    void sendNoteOff(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity);
+    //
+    // Note On/Off carry an optional Attribute (type + 16-bit data): 0x00 none
+    // (default), 0x03 Pitch 7.9, or a Profile-defined type such as the Drums
+    // Profile's 0x20 (4-bit gesture | 12-bit distance-from-center). A receiver
+    // that does not understand the attribute type ignores the attribute data.
+    void sendNoteOn(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity,
+                    uint8_t attrType = 0, uint16_t attrData = 0);
+    void sendNoteOff(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity,
+                     uint8_t attrType = 0, uint16_t attrData = 0);
     void sendPolyPressure(uint8_t group, uint8_t channel, uint8_t note, uint32_t pressure);
+
+    /// Registered Per-Note Controller (MT 0x4). `index` is the RPNC number (e.g.
+    /// the Drums Profile's 0x74 Position Angle / 0x73 Distance / 0x70-0x72), and
+    /// `value` is the full 32-bit controller value. Per MIDI 2.0, may be sent
+    /// before the Note On to pre-arm the value for the upcoming note.
+    void sendPerNoteRPN(uint8_t group, uint8_t channel, uint8_t note, uint8_t index, uint32_t value);
+
+    /// Per-Note Pitch Bend (MT 0x4), 32-bit centred at 0x80000000.
+    void sendPerNotePitchBend(uint8_t group, uint8_t channel, uint8_t note, uint32_t value);
 
     /// Bridge a MIDI 1.0 channel-voice message (status + up to 2 data bytes) to an
     /// MT 0x4 UMP on the given group, scaling 7-bit values to MIDI 2.0 resolution.
