@@ -194,7 +194,7 @@ private:
     uint32_t makeMUID() const;                            ///< draw a fresh 28-bit MUID (random if seeded)
     bool     ciCheckMUID(uint8_t group, uint32_t muid);   ///< is this MUID addressed to us?
     void     routeSysEx7(const umpData &mess);            ///< UMP SysEx7 -> CI processor (form-aware)
-    void     onCIDiscovery(const MIDICI &ci);             ///< Discovery -> Discovery Reply
+    void     onCIDiscovery(const MIDICI &ci, uint16_t peerMaxSysex); ///< Discovery -> Discovery Reply
     void     onCIInvalidateMUID(uint32_t terminateMuid);  ///< drop our MUID -> regenerate next time
     void     onCIProfileInquiry(const MIDICI &ci);        ///< Profile Inquiry -> Profile List (empty pre-M6)
     void     onCIPECapabilities(const MIDICI &ci);        ///< PE Capabilities -> Reply
@@ -221,6 +221,7 @@ private:
     umpProcessor    ump_;
     midiCIProcessor ci_;
     uint32_t        localMUID_    = 0;      ///< this Function Block's MUID (valid when muidValid_)
+    uint16_t        peerMaxSysex_ = 512;    ///< initiator's max receivable SysEx (from Discovery); chunk replies to fit
     bool            muidValid_    = false;  ///< MUID generated this session?
     bool            ciInProgress_ = false;  ///< a MIDI-CI SysEx7 is mid-reassembly
     UMPRandFn       randFn_        = nullptr;

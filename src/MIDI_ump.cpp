@@ -84,6 +84,15 @@ namespace
     constexpr uint8_t  PE_MIN_VER = 0;
     constexpr uint16_t PE_STATUS_OK = 200;
 
+    // PE reply chunking. On-wire SysEx message = F0 + fixed CI/PE fields + header
+    // + body + F7; the fixed overhead (everything but header/body) is 24 bytes.
+    // A reply body larger than one message is split across multiple PE messages
+    // (same requestId, incrementing "Number of This Chunk"; the header appears in
+    // chunk 1 only). Each chunk's wire size is capped at min(initiator max SysEx,
+    // our build budget) so it fits both the receiver and our peSysex_ buffer.
+    constexpr uint16_t PE_MSG_FIXED   = 24;    // F0..F7 framing + PE fixed fields
+    constexpr uint16_t PE_OUT_MSG_CAP = 1024;  // per-chunk wire cap (<= peSysex_)
+
     // Extract the "resource" value span from a Restricted-JSON PE header
     // (Contribution 16: {"resource":"<name>"[,"option":...]}). Resolving the name
     // to a resource once here (§4.3) avoids any post-dispatch string scanning.
@@ -656,8 +665,8 @@ void UMP_Endpoint::initCI()
     ci_.setRecvDiscovery([this](MIDICI ci,
                                 std::array<uint8_t, 3>, std::array<uint8_t, 2>,
                                 std::array<uint8_t, 2>, std::array<uint8_t, 4>,
-                                uint8_t, uint16_t, uint8_t)
-                         { onCIDiscovery(ci); });
+                                uint8_t, uint16_t maxSysex, uint8_t)
+                         { onCIDiscovery(ci, maxSysex); });
 
     ci_.setRecvInvalidateMUID([this](MIDICI, uint32_t terminateMuid) { onCIInvalidateMUID(terminateMuid); });
 
@@ -757,9 +766,13 @@ void UMP_Endpoint::sendCISysex(uint8_t group, const uint8_t *body, uint16_t len)
 // Discovery -> Discovery Reply, advertising our identity + supported categories
 // (Profile Configuration + Property Exchange). srcMUID is ours; destMUID is the
 // initiator (ci.remoteMUID).
-void UMP_Endpoint::onCIDiscovery(const MIDICI &ci)
+void UMP_Endpoint::onCIDiscovery(const MIDICI &ci, uint16_t peerMaxSysex)
 {
     ensureMUID();   // first Discovery: pick this session's random MUID
+
+    // Remember the initiator's receivable max SysEx so PE replies are chunked to
+    // fit. Common Rules floor is 512; guard against a bogus/zero advertisement.
+    peerMaxSysex_ = (peerMaxSysex >= 512) ? peerMaxSysex : 512;
 
     std::array<uint8_t, 3> manuId   = { kmi_id_1, kmi_id_2, kmi_id_3 };
     std::array<uint8_t, 2> familyId = { kmi_family_lsb, kmi_family_msb };
@@ -919,7 +932,12 @@ void UMP_Endpoint::onCIPESetInquiry(const MIDICI &ci, const char *header, uint16
     sendPESetReplyStatus(ci, status);
 }
 
-// Build a PE Get Reply (single chunk): header = {"status":<code>}, body = JSON.
+// Build a PE Get Reply: header = {"status":<code>}, body = JSON. Splits the body
+// across multiple PE chunks when it won't fit the initiator's max SysEx in one
+// message (the header rides chunk 1 only). Note: all chunks are queued into the
+// outbound accumulator before the next flush, so a single reply is bounded by the
+// TX buffer — ample for the resources here; a multi-KB property would need
+// incremental flushing.
 void UMP_Endpoint::sendPEReply(const MIDICI &ci, uint16_t status, const uint8_t *body, uint16_t bodyLen)
 {
     char hdr[24];
@@ -929,10 +947,33 @@ void UMP_Endpoint::sendPEReply(const MIDICI &ci, uint16_t status, const uint8_t 
         return;
     }
     const uint8_t *b = (body != nullptr) ? body : (const uint8_t *)"";
-    uint16_t n = CIMessage::sendPEGetReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
-                                           ci.requestId, (uint16_t)hlen, (uint8_t *)hdr,
-                                           /*numChunks*/ 1, /*thisChunk*/ 1, bodyLen, (uint8_t *)b);
-    sendCISysex(ci.umpGroup, peSysex_, n);
+
+    // Body room per chunk: chunk 1 also carries the header; chunks 2..N do not.
+    uint16_t cap   = (peerMaxSysex_ < PE_OUT_MSG_CAP) ? peerMaxSysex_ : PE_OUT_MSG_CAP;
+    int      room1 = (int)cap - PE_MSG_FIXED - hlen;
+    int      roomN = (int)cap - PE_MSG_FIXED;
+    if (room1 < 1) room1 = 1;
+    if (roomN < 1) roomN = 1;
+
+    uint16_t numChunks = 1;
+    if ((int)bodyLen > room1)
+    {
+        numChunks = (uint16_t)(1 + ((int)bodyLen - room1 + roomN - 1) / roomN);
+    }
+
+    uint16_t off = 0;
+    for (uint16_t chunk = 1; chunk <= numChunks; chunk++)
+    {
+        bool     first   = (chunk == 1);
+        int      room    = first ? room1 : roomN;
+        uint16_t thisLen = ((int)(bodyLen - off) < room) ? (uint16_t)(bodyLen - off) : (uint16_t)room;
+        uint16_t n = CIMessage::sendPEGetReply(
+            peSysex_, ci.ciVer, localMUID_, ci.remoteMUID, ci.requestId,
+            first ? (uint16_t)hlen : 0, (uint8_t *)hdr,
+            numChunks, chunk, thisLen, (uint8_t *)(b + off));
+        sendCISysex(ci.umpGroup, peSysex_, n);
+        off += thisLen;
+    }
 }
 
 // PE Set Reply: status-only header, no body.
