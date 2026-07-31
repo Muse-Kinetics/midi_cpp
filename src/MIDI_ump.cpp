@@ -732,12 +732,20 @@ void UMP_Endpoint::onCIInvalidateMUID(uint32_t terminateMuid)
 }
 
 // A SysEx7 UMP arrives one packet at a time with a form nibble (M2-104 §4.2):
-// COMPLETE (single), START, CONTINUE, END. midiCIProcessor is a streaming byte
-// parser, so we open on START/COMPLETE, feed bytes, and close on END/COMPLETE —
-// but only for MIDI-CI SysEx (Universal Non-RT 0x7E, sub-ID 0x0D).
+// COMPLETE (single), START, CONTINUE, END.
+//   - MIDI-CI SysEx (Universal Non-RT 0x7E, sub-ID 0x0D) streams into the
+//     midiCIProcessor (itself a streaming byte parser): open on START/COMPLETE,
+//     feed bytes, close on END/COMPLETE.
+//   - Any OTHER SysEx7 is product/application SysEx (KMI messages, a Universal
+//     Identity Request, ...). We reassemble its body and, on completion, hand it
+//     to appSink_ (which reframes F0/F7 and dispatches to the app's receiver).
+// The two are mutually exclusive per message and use disjoint state.
 void UMP_Endpoint::routeSysEx7(const umpData &mess)
 {
-    if (mess.form == SX7_COMPLETE || mess.form == SX7_START)
+    const bool start = (mess.form == SX7_COMPLETE || mess.form == SX7_START);
+    const bool end   = (mess.form == SX7_COMPLETE || mess.form == SX7_END);
+
+    if (start)
     {
         ciInProgress_ = (mess.dataLength >= CI_MIN_SYSEX_LEN
                          && mess.data[0] == S7UNIVERSAL_NRT
@@ -747,23 +755,50 @@ void UMP_Endpoint::routeSysEx7(const umpData &mess)
             uint8_t deviceId = (mess.dataLength >= 2) ? mess.data[1] : (uint8_t)FUNCTION_BLOCK;
             ci_.startSysex7(mess.umpGroup, deviceId);
         }
+        // Non-CI SysEx7 -> app sink (only if one is registered).
+        appSxInProgress_ = (!ciInProgress_ && appSink_ != nullptr);
+        appSxOverflow_   = false;
+        appSxLen_        = 0;
+        appSxGroup_      = mess.umpGroup;
     }
 
-    if (!ciInProgress_)
+    if (ciInProgress_)
     {
+        for (uint8_t i = 0; i < mess.dataLength; i++)
+        {
+            ci_.processMIDICI(mess.data[i]);
+        }
+        if (end)
+        {
+            ci_.endSysex7();
+            ciInProgress_ = false;
+        }
         return;
     }
 
-    for (uint8_t i = 0; i < mess.dataLength; i++)
+    if (appSxInProgress_)
     {
-        ci_.processMIDICI(mess.data[i]);
+        for (uint8_t i = 0; i < mess.dataLength; i++)
+        {
+            if (appSxLen_ < APP_SX_BYTES) appSxBuf_[appSxLen_++] = mess.data[i];
+            else                          appSxOverflow_ = true;  // too large; drop whole message
+        }
+        if (end)
+        {
+            if (!appSxOverflow_ && appSink_ != nullptr)
+            {
+                appSink_(appSxGroup_, appSxBuf_, appSxLen_);
+            }
+            appSxInProgress_ = false;
+        }
     }
+}
 
-    if (mess.form == SX7_COMPLETE || mess.form == SX7_END)
-    {
-        ci_.endSysex7();
-        ciInProgress_ = false;
-    }
+// Public: pack an arbitrary SysEx body (no F0/F7) into SysEx7 UMP. Product SysEx
+// (KMI app messages, tether, debug, Identity reply) reuses the same packer.
+void UMP_Endpoint::sendSysex7(uint8_t group, const uint8_t *body, uint16_t len)
+{
+    sendCISysex(group, body, len);
 }
 
 // Pack an already-built MIDI-CI SysEx body (0x7E ... last byte, no F0/F7) into

@@ -61,6 +61,14 @@ typedef bool (*UMPEmitFn)(const uint8_t *bytes, uint16_t len);
 /// a *stable* MUID derived from the Product Instance Id (fails that rule — set it).
 typedef uint32_t (*UMPRandFn)(void);
 
+/// Sink for inbound UMP SysEx7 that is NOT MIDI-CI (i.e. product/application
+/// SysEx such as KMI messages or a Universal Identity Request). The engine
+/// reassembles the whole message and hands the body (the bytes between F0/F7,
+/// without F0/F7) to this callback; the app adds framing and dispatches it to
+/// its own SysEx receiver. Registered via setAppSysexSink(); if unset, non-CI
+/// SysEx7 is dropped (the default before this bridge existed).
+typedef void (*UMPAppSysexFn)(uint8_t group, const uint8_t *body, uint16_t len);
+
 /// UMP Function Block direction (M2-104 §7.1.8).
 enum UMP_FB_Direction : uint8_t
 {
@@ -203,6 +211,10 @@ public:
     /// Supply a hardware entropy source for the MIDI-CI MUID (see UMPRandFn).
     void setRandomSource(UMPRandFn fn) { randFn_ = fn; }
 
+    /// Register a sink for inbound non-MIDI-CI SysEx7 (product/app SysEx). See
+    /// UMPAppSysexFn. Enables receiving KMI app SysEx / Identity over UMP.
+    void setAppSysexSink(UMPAppSysexFn fn) { appSink_ = fn; }
+
     /// Wire the transport and register the UMP Stream callbacks.
     void init(UMPEmitFn emit, uint16_t maxPacketSize);
 
@@ -239,6 +251,12 @@ public:
     /// Bridge a MIDI 1.0 channel-voice message (status + up to 2 data bytes) to an
     /// MT 0x4 UMP on the given group, scaling 7-bit values to MIDI 2.0 resolution.
     void sendMIDI1ChannelVoice(uint8_t status, uint8_t d1, uint8_t d2, uint8_t group);
+
+    /// Pack an arbitrary SysEx byte stream — 7-bit data, WITHOUT the F0/F7
+    /// framing — into UMP SysEx7 packets (MT 0x3) and queue them for flush.
+    /// For product SysEx (KMI app messages, tether, debug, Identity reply) over
+    /// UMP; the same packer MIDI-CI uses internally.
+    void sendSysex7(uint8_t group, const uint8_t *body, uint16_t len);
 
 private:
     void onEndpointDiscovery(uint8_t majVer, uint8_t minVer, uint8_t filter);
@@ -291,6 +309,17 @@ private:
     UMPRandFn       randFn_        = nullptr;
     UMPEmitFn       emit_          = nullptr;
     uint16_t        maxPacketSize_ = 0;
+
+    // Inbound non-MIDI-CI SysEx7 reassembly (KMI app SysEx / Identity). A SysEx7
+    // stream arrives one <=6-byte packet at a time; we collect the body across
+    // START/CONTINUE/END and hand the whole thing to appSink_ on completion.
+    UMPAppSysexFn         appSink_        = nullptr;
+    bool                  appSxInProgress_ = false;
+    bool                  appSxOverflow_   = false;  ///< body exceeded appSxBuf_; drop on end
+    uint8_t               appSxGroup_      = 0;
+    uint16_t              appSxLen_        = 0;
+    static const uint16_t APP_SX_BYTES     = 256;    ///< inbound app SysEx are small (EVENT_* commands, Identity)
+    uint8_t               appSxBuf_[APP_SX_BYTES];
 
     const char *endpointName_      = "";
     const char *productInstanceId_ = "";
