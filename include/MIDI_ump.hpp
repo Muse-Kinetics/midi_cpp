@@ -69,6 +69,15 @@ typedef uint32_t (*UMPRandFn)(void);
 /// SysEx7 is dropped (the default before this bridge existed).
 typedef void (*UMPAppSysexFn)(uint8_t group, const uint8_t *body, uint16_t len);
 
+/// Hook invoked AFTER an inbound MIDI-CI Set Profile On/Off changes a profile's
+/// enabled state (`id` = 5-byte profile, `enabled` = the new state). Lets the
+/// product apply cross-profile policy (e.g. mutual exclusion) and side effects
+/// (channel-voice mode) for host-driven changes, matching its own local control
+/// path. Registered via setProfileChangeHook(). NOT called for device-initiated
+/// setProfileEnabled() — so the hook may safely call setProfileEnabled() to
+/// disable a conflicting profile without recursing.
+typedef void (*UMPProfileChangeFn)(const uint8_t id[5], bool enabled);
+
 /// UMP Function Block direction (M2-104 §7.1.8).
 enum UMP_FB_Direction : uint8_t
 {
@@ -201,6 +210,13 @@ public:
     /// Valid only from within a UMP_Profile::onSpecificData callback.
     void replyProfileData(const uint8_t *data, uint16_t len);
 
+    /// Device-initiated profile enable/disable (e.g. from a local UI/event), not
+    /// a host Set Profile On/Off. numChannels 0 = disable; >0 = enable (the
+    /// profile's onEnable may override the count). When `notify`, the engine
+    /// broadcasts the Profile Enabled/Disabled report (addressed to the Broadcast
+    /// MUID). Pass notify=false to set initial state silently (e.g. at boot).
+    void setProfileEnabled(const uint8_t id[5], uint8_t numChannels, bool notify = true);
+
     /// Declare the endpoint's Function Blocks (array borrowed, not copied).
     void setFunctionBlocks(const UMP_FunctionBlock *blocks, uint8_t count)
     { fbs_ = blocks; fbCount_ = count; }
@@ -214,6 +230,10 @@ public:
     /// Register a sink for inbound non-MIDI-CI SysEx7 (product/app SysEx). See
     /// UMPAppSysexFn. Enables receiving KMI app SysEx / Identity over UMP.
     void setAppSysexSink(UMPAppSysexFn fn) { appSink_ = fn; }
+
+    /// Register a hook called after an inbound Set Profile On/Off (see
+    /// UMPProfileChangeFn), e.g. to enforce mutual exclusion between profiles.
+    void setProfileChangeHook(UMPProfileChangeFn fn) { onProfileChange_ = fn; }
 
     /// Wire the transport and register the UMP Stream callbacks.
     void init(UMPEmitFn emit, uint16_t maxPacketSize);
@@ -251,6 +271,11 @@ public:
     /// Bridge a MIDI 1.0 channel-voice message (status + up to 2 data bytes) to an
     /// MT 0x4 UMP on the given group, scaling 7-bit values to MIDI 2.0 resolution.
     void sendMIDI1ChannelVoice(uint8_t status, uint8_t d1, uint8_t d2, uint8_t group);
+
+    /// Send a MIDI 1.0 channel-voice message VERBATIM as UMP MT 0x2 (MIDI 1.0
+    /// Channel Voice), i.e. no scaling — one 32-bit word. Used for MPE-compat mode
+    /// where the host / OS translates MT2 back to a legacy MIDI 1.0 (MPE) stream.
+    void sendMIDI1ChannelVoiceMT2(uint8_t status, uint8_t d1, uint8_t d2, uint8_t group);
 
     /// Pack an arbitrary SysEx byte stream — 7-bit data, WITHOUT the F0/F7
     /// framing — into UMP SysEx7 packets (MT 0x3) and queue them for flush.
@@ -313,7 +338,8 @@ private:
     // Inbound non-MIDI-CI SysEx7 reassembly (KMI app SysEx / Identity). A SysEx7
     // stream arrives one <=6-byte packet at a time; we collect the body across
     // START/CONTINUE/END and hand the whole thing to appSink_ on completion.
-    UMPAppSysexFn         appSink_        = nullptr;
+    UMPAppSysexFn         appSink_         = nullptr;
+    UMPProfileChangeFn    onProfileChange_ = nullptr;  ///< product hook for inbound profile on/off
     bool                  appSxInProgress_ = false;
     bool                  appSxOverflow_   = false;  ///< body exceeded appSxBuf_; drop on end
     uint8_t               appSxGroup_      = 0;

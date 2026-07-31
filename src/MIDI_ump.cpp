@@ -801,6 +801,16 @@ void UMP_Endpoint::sendSysex7(uint8_t group, const uint8_t *body, uint16_t len)
     sendCISysex(group, body, len);
 }
 
+// Emit a MIDI 1.0 channel-voice message verbatim as UMP MT 0x2 (one 32-bit word:
+// [MT|group][status][d1][d2]). No scaling — the OS/host translates MT2 back to a
+// legacy MIDI 1.0 stream (MPE-compat).
+void UMP_Endpoint::sendMIDI1ChannelVoiceMT2(uint8_t status, uint8_t d1, uint8_t d2, uint8_t group)
+{
+    uint32_t w = ((uint32_t)0x2u << 28) | ((uint32_t)(group & 0x0F) << 24)
+               | ((uint32_t)status << 16) | ((uint32_t)(d1 & 0x7F) << 8) | (uint32_t)(d2 & 0x7F);
+    queueUMP(&w, 1);
+}
+
 // Pack an already-built MIDI-CI SysEx body (0x7E ... last byte, no F0/F7) into
 // SysEx7 UMP packets (6 bytes/packet) and queue them for flush.
 void UMP_Endpoint::sendCISysex(uint8_t group, const uint8_t *body, uint16_t len)
@@ -908,6 +918,10 @@ void UMP_Endpoint::onCIProfileOn(const MIDICI &ci, const uint8_t id[5], uint8_t 
         ? CIMessage::sendProfileEnabled(sx, ci.ciVer, localMUID_, ci.remoteMUID, ci.deviceId, idArray(id), ch)
         : CIMessage::sendProfileDisabled(sx, ci.ciVer, localMUID_, ci.remoteMUID, ci.deviceId, idArray(id), 0);
     sendCISysex(ci.umpGroup, sx, len);
+
+    // Let the product coordinate (e.g. disable a mutually-exclusive profile). The
+    // hook may call setProfileEnabled() safely — that path does not re-enter here.
+    if (onProfileChange_ != nullptr) onProfileChange_(id, ch > 0);
 }
 
 // Set Profile Off -> disable via the product callback, then notify Disabled.
@@ -926,6 +940,43 @@ void UMP_Endpoint::onCIProfileOff(const MIDICI &ci, const uint8_t id[5])
     uint16_t len = CIMessage::sendProfileDisabled(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                   ci.deviceId, idArray(id), 0);
     sendCISysex(ci.umpGroup, sx, len);
+
+    if (onProfileChange_ != nullptr) onProfileChange_(id, false);
+}
+
+// Device-initiated profile enable/disable (local UI/event), with an optional
+// broadcast Profile Enabled/Disabled report. Mirrors onCIProfileOn/Off but has no
+// initiator, so the report is addressed to the Broadcast MUID.
+void UMP_Endpoint::setProfileEnabled(const uint8_t id[5], uint8_t numChannels, bool notify)
+{
+    int8_t idx = profileIndex(id);
+    if (idx < 0) return;   // unknown profile
+
+    uint8_t ch;
+    if (numChannels > 0)
+    {
+        ch = (profiles_[idx].onEnable != nullptr)
+                 ? profiles_[idx].onEnable(numChannels, profiles_[idx].ctx)
+                 : numChannels;
+    }
+    else
+    {
+        if (profiles_[idx].onDisable != nullptr) profiles_[idx].onDisable(profiles_[idx].ctx);
+        ch = 0;
+    }
+    profileChannels_[idx] = ch;
+
+    if (!notify) return;
+
+    ensureMUID();   // need a valid local (source) MUID to originate the report
+    const uint8_t deviceId = profiles_[idx].address;
+    uint8_t  sx[32];
+    uint16_t len = (ch > 0)
+        ? CIMessage::sendProfileEnabled(sx, FB_MIDICI_SUPPORT, localMUID_, M2_CI_BROADCAST,
+                                        deviceId, idArray(id), ch)
+        : CIMessage::sendProfileDisabled(sx, FB_MIDICI_SUPPORT, localMUID_, M2_CI_BROADCAST,
+                                         deviceId, idArray(id), 0);
+    sendCISysex(/*group*/ 0, sx, len);   // single Function Block on UMP group 0
 }
 
 // Profile Details Inquiry -> Reply. The reply payload is profile-specific and
