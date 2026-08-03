@@ -1255,7 +1255,15 @@ int UMP_Endpoint::buildChannelListJSON(char *out, int cap)
 // canSet + an inline JSON Schema (explicit, or auto-derived from a field table).
 int UMP_Endpoint::buildResourceListJSON(char *out, int cap)
 {
-    int n = snprintf(out, (size_t)cap, "[{\"resource\":\"DeviceInfo\"},{\"resource\":\"ChannelList\"}");
+    // ChannelList: declare explicit columns. Per M2-105 §4.7 the default column
+    // set includes ProgramList; a device without one MUST override columns or a
+    // strict PE consumer (e.g. MIDI 2.0 Workbench) will flag each channel object
+    // as malformed for lacking a program list. We serve only title + channel.
+    int n = snprintf(out, (size_t)cap,
+        "[{\"resource\":\"DeviceInfo\"},"
+        "{\"resource\":\"ChannelList\",\"columns\":["
+        "{\"property\":\"title\",\"title\":\"Title\"},"
+        "{\"property\":\"channel\",\"title\":\"MIDI Channel\"}]}");
     if (n < 0 || n >= cap) return -1;
 
     for (uint8_t i = 0; i < peResCount_; i++)
