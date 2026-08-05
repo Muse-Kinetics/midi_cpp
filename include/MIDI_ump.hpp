@@ -129,6 +129,11 @@ typedef bool (*UMP_PEApplyFn)(void *ctx);
 typedef int (*UMP_PEGetFn)(char *out, int cap, void *ctx);
 typedef int (*UMP_PESetFn)(const char *body, int len, void *ctx);
 
+/// Byte sink for streaming PE-body generation: called with successive pieces of the
+/// JSON body. Lets the engine generate a large body (e.g. the ResourceList) directly
+/// into transmission chunks without staging the whole thing in one buffer.
+typedef void (*UMP_PEEmit)(void *ctx, const char *s, int n);
+
 /// A product-specific Property Exchange resource. Products register these; the
 /// engine serves the foundational resources (ResourceList/DeviceInfo/ChannelList)
 /// itself. All pointers are borrowed. Two forms:
@@ -333,7 +338,16 @@ private:
     const UMP_PEResource *findPEResource(const char *name, uint16_t nameLen); ///< product-table lookup
     int      buildDeviceInfoJSON(char *out, int cap);     ///< foundational resource: DeviceInfo
     int      buildChannelListJSON(char *out, int cap);    ///< foundational resource: ChannelList
-    int      buildResourceListJSON(char *out, int cap);   ///< foundational resource: ResourceList (+ product)
+    // ResourceList is streamed (it grows with resource count): generated twice — once
+    // to count length, once to emit straight into PE chunks — so it needs no whole-body buffer.
+    void     streamResourceListReply(const MIDICI &ci, uint16_t status);
+    void     genResourceList(UMP_PEEmit emit, void *ctx);                     ///< emit the ResourceList body
+    void     genSchemaFromFields(const char *title, const UMP_PEField *fields, uint8_t n,
+                                 UMP_PEEmit emit, void *ctx);                 ///< emit a field table's JSON Schema
+    void     sendPEChunk(const MIDICI &ci, const char *hdr, int hlen, uint16_t numChunks,
+                         uint16_t chunk, const uint8_t *body, uint16_t len);  ///< frame + send one PE Get-Reply chunk
+    static void peCountEmit(void *ctx, const char *s, int n);                 ///< sink: count total bytes
+    static void peChunkEmit(void *ctx, const char *s, int n);                 ///< sink: accumulate + flush PE chunks
     void     sendCISysex(uint8_t group, const uint8_t *body, uint16_t len); ///< pack CI bytes as SysEx7 UMP
 
     void queueUMP(const uint32_t *words, uint8_t nWords);
@@ -386,15 +400,18 @@ private:
     uint8_t               curProfileGroup_      = 0;
     uint8_t               curProfileDeviceId_   = 0x7F;  ///< Device ID (address) of the in-flight profile transaction
 
-    // Property Exchange scratch (single-chunk). peJson_ builds a resource body
-    // (or the ResourceList, which now carries auto-derived schemas); peSysex_ is
-    // the assembled CI SysEx; peSetBuf_ reassembles an inbound Set body across
-    // the CI processor's <=256-byte slices. Sized so the multi-field settable
-    // resources + their ResourceList schemas fit one message (advertised max
-    // SysEx below). Larger payloads would need real PE chunking (future).
+    // Property Exchange scratch. peJson_ stages a BOUNDED resource body (DeviceInfo,
+    // ChannelList, a resource's field values, or an escape-hatch get()) before
+    // sendPEReply chunks it for transmission. The ResourceList — which grows with the
+    // resource count — is NOT staged here: streamResourceListReply() generates it
+    // twice (count, then emit) straight into peChunk_-sized PE chunks, so it never
+    // needs a whole-body buffer. peSysex_ holds one framed CI SysEx chunk; peSetBuf_
+    // reassembles an inbound Set body across the CI processor's <=256-byte slices;
+    // peChunk_ accumulates one outgoing PE chunk during streaming.
     char        peJson_[1280];
     uint8_t     peSysex_[1280];
     uint8_t     peSetBuf_[1024];
+    uint8_t     peChunk_[1024];   // one streamed PE chunk (<= peerMaxSysex - fixed)
     uint16_t    peSetLen_ = 0;
 
     // ---- Property Exchange Subscriptions (device pushes "full" updates) --------

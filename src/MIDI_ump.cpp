@@ -33,6 +33,7 @@
 #include <cstring>
 #include <cstdio>                  // snprintf (Property Exchange JSON bodies)
 #include <cstdlib>                 // strtol / strtod (Restricted-JSON value readers)
+#include <cstdarg>                 // va_list (streaming PE-body emitf)
 
 namespace
 {
@@ -291,26 +292,24 @@ namespace
         }
     }
 
-    // Derive a JSON Schema object from a field table (single source of truth, so
-    // it can never drift from Get/Set). Returns length or -1 on overflow.
-    int buildSchemaFromFields(const char *title, const UMP_PEField *fields, uint8_t n, char *out, int cap)
+    // ---- streaming PE-body sink helpers -------------------------------------
+    // emit_raw pushes a whole string; emitf formats a short piece (schema/property
+    // fragments are small) into a stack buffer and pushes it. Both go through the sink.
+    void emit_raw(UMP_PEEmit e, void *c, const char *s) { if (s && *s) e(c, s, (int)strlen(s)); }
+    void emitf(UMP_PEEmit e, void *c, const char *fmt, ...)
     {
-        int p = snprintf(out, cap, "{\"title\":\"%s\",\"type\":\"object\",\"properties\":{",
-                         title ? title : "");
-        if (p < 0 || p >= cap) return -1;
-        for (uint8_t i = 0; i < n; i++)
-        {
-            int m = snprintf(out + p, cap - p, "%s\"%s\":{\"type\":\"%s\"}",
-                             i ? "," : "", fields[i].name, jsonSchemaType(fields[i].type));
-            if (m < 0 || m >= cap - p) return -1;
-            p += m;
-        }
-        if (p + 3 > cap) return -1;
-        out[p++] = '}';
-        out[p++] = '}';
-        out[p]   = '\0';
-        return p;
+        char b[192];
+        va_list ap; va_start(ap, fmt);
+        int n = vsnprintf(b, sizeof(b), fmt, ap);
+        va_end(ap);
+        if (n < 0) return;
+        if (n > (int)sizeof(b) - 1) n = (int)sizeof(b) - 1;   // fragments are short; never truncates in practice
+        if (n > 0) e(c, b, n);
     }
+    struct PECountCtx { int total; };
+    struct PEChunkCtx { UMP_Endpoint *ep; const MIDICI *ci; const char *hdr; int hlen;
+                        uint16_t numChunks; uint16_t chunk; int room1; int roomN;
+                        uint8_t *buf; int bufLen; int room; };
     // SysEx7 form nibble (M2-104 §4.2).
     constexpr uint8_t  SX7_COMPLETE  = 0x0;
     constexpr uint8_t  SX7_START     = 0x1;
@@ -1016,9 +1015,18 @@ void UMP_Endpoint::onCIProfileSpecificData(const MIDICI &ci, const uint8_t id[5]
                                            const uint8_t *data, uint16_t len, uint16_t part, bool last)
 {
     int8_t idx = profileIndex(id);
+    if (idx < 0)
+    {
+        // AM_MIDI2.0Lib mis-parses the 5-byte profile id in a Profile Specific Data
+        // message: the first byte comes through corrupted while bytes 1-4 are reliable
+        // (verified on hardware — id arrives as {03,20,04,01,01} for {7E,20,04,01,01}).
+        // Fall back to matching on bytes 1-4 so the profile is still resolved.
+        for (uint8_t i = 0; i < profileCount_; i++)
+            if (memcmp(profiles_[i].id + 1, id + 1, 4) == 0) { idx = (int8_t)i; break; }
+    }
     if (idx < 0 || profiles_[idx].onSpecificData == nullptr) return;
 
-    memcpy(curProfileId_, id, 5);
+    memcpy(curProfileId_, profiles_[idx].id, 5);   // canonical id so the reply is well-formed
     curProfileCiVer_      = ci.ciVer;
     curProfileRemoteMUID_ = ci.remoteMUID;
     curProfileGroup_      = ci.umpGroup;
@@ -1086,12 +1094,14 @@ void UMP_Endpoint::onCIPEGetInquiry(const MIDICI &ci, const char *header, uint16
         return;
     }
 
-    int bodyLen = -1;
-    if (peNameIs(name, nameLen, "ResourceList"))
+    if (peNameIs(name, nameLen, "ResourceList"))   // streamed (grows with resource count)
     {
-        bodyLen = buildResourceListJSON(peJson_, (int)sizeof(peJson_));
+        streamResourceListReply(ci, PE_STATUS_OK);
+        return;
     }
-    else if (peNameIs(name, nameLen, "DeviceInfo"))
+
+    int bodyLen = -1;
+    if (peNameIs(name, nameLen, "DeviceInfo"))
     {
         bodyLen = buildDeviceInfoJSON(peJson_, (int)sizeof(peJson_));
     }
@@ -1396,70 +1406,104 @@ int UMP_Endpoint::buildChannelListJSON(char *out, int cap)
     return (n < 0 || n >= cap) ? -1 : n;
 }
 
-// Foundational resource: ResourceList (M2-105) — every resource this device
-// serves: the foundational ones plus each registered product resource, with
-// canSet + an inline JSON Schema (explicit, or auto-derived from a field table).
-int UMP_Endpoint::buildResourceListJSON(char *out, int cap)
+// Emit a field table's JSON Schema through the sink (single source of truth with Get/Set).
+void UMP_Endpoint::genSchemaFromFields(const char *title, const UMP_PEField *fields, uint8_t n,
+                                       UMP_PEEmit emit, void *ctx)
 {
-    // ChannelList: declare explicit columns. Per M2-105 §4.7 the default column
-    // set includes ProgramList; a device without one MUST override columns or a
-    // strict PE consumer (e.g. MIDI 2.0 Workbench) will flag each channel object
-    // as malformed for lacking a program list. We serve only title + channel.
-    int n = snprintf(out, (size_t)cap,
+    emitf(emit, ctx, "{\"title\":\"%s\",\"type\":\"object\",\"properties\":{", title ? title : "");
+    for (uint8_t i = 0; i < n; i++)
+        emitf(emit, ctx, "%s\"%s\":{\"type\":\"%s\"}", i ? "," : "", fields[i].name, jsonSchemaType(fields[i].type));
+    emit_raw(emit, ctx, "}}");
+}
+
+// Foundational resource: ResourceList (M2-105) — the foundational resources plus each
+// registered product resource, with canSet / canSubscribe / inline schema. Emitted
+// through the sink so it is never staged whole (called twice by streamResourceListReply).
+void UMP_Endpoint::genResourceList(UMP_PEEmit emit, void *ctx)
+{
+    // ChannelList declares explicit columns (M2-105 §4.7): a device without a
+    // ProgramList MUST override columns or a strict PE consumer flags each channel.
+    emit_raw(emit, ctx,
         "[{\"resource\":\"DeviceInfo\"},"
         "{\"resource\":\"ChannelList\",\"columns\":["
         "{\"property\":\"title\",\"title\":\"Title\"},"
         "{\"property\":\"channel\",\"title\":\"MIDI Channel\"}]}");
-    if (n < 0 || n >= cap) return -1;
 
     for (uint8_t i = 0; i < peResCount_; i++)
     {
         const UMP_PEResource &r = peRes_[i];
-        int m = snprintf(out + n, (size_t)(cap - n), ",{\"resource\":\"%s\"", r.name);
-        if (m < 0 || m >= cap - n) return -1;
-        n += m;
+        emitf(emit, ctx, ",{\"resource\":\"%s\"", r.name);
 
         bool settable = (r.fields != nullptr) ? r.writable : (r.set != nullptr);
-        if (settable)
-        {
-            m = snprintf(out + n, (size_t)(cap - n), ",\"canSet\":\"full\"");
-            if (m < 0 || m >= cap - n) return -1;
-            n += m;
-        }
+        if (settable)       emit_raw(emit, ctx, ",\"canSet\":\"full\"");
+        if (r.subscribable) emit_raw(emit, ctx, ",\"canSubscribe\":true");
 
-        if (r.subscribable)
-        {
-            m = snprintf(out + n, (size_t)(cap - n), ",\"canSubscribe\":true");
-            if (m < 0 || m >= cap - n) return -1;
-            n += m;
-        }
-
-        // Manufacturer-specific ("X-") resources must carry an inline JSON Schema:
-        // an explicit one if provided, else derived from the declarative fields.
-        if (r.schema != nullptr)
-        {
-            m = snprintf(out + n, (size_t)(cap - n), ",\"schema\":%s", r.schema);
-            if (m < 0 || m >= cap - n) return -1;
-            n += m;
-        }
-        else if (r.fields != nullptr)
-        {
-            m = snprintf(out + n, (size_t)(cap - n), ",\"schema\":");
-            if (m < 0 || m >= cap - n) return -1;
-            n += m;
-            m = buildSchemaFromFields(r.title, r.fields, r.fieldCount, out + n, cap - n);
-            if (m < 0) return -1;
-            n += m;
-        }
-
-        if (n + 1 > cap) return -1;
-        out[n++] = '}';
+        if (r.schema != nullptr)      { emit_raw(emit, ctx, ",\"schema\":"); emit_raw(emit, ctx, r.schema); }
+        else if (r.fields != nullptr) { emit_raw(emit, ctx, ",\"schema\":");
+                                        genSchemaFromFields(r.title, r.fields, r.fieldCount, emit, ctx); }
+        emit_raw(emit, ctx, "}");
     }
+    emit_raw(emit, ctx, "]");
+}
 
-    if (n + 2 > cap) return -1;
-    out[n++] = ']';
-    out[n]   = '\0';
-    return n;
+void UMP_Endpoint::peCountEmit(void *ctx, const char *, int n)
+{
+    ((PECountCtx *)ctx)->total += n;
+}
+
+void UMP_Endpoint::peChunkEmit(void *ctx, const char *s, int n)
+{
+    PEChunkCtx *x = (PEChunkCtx *)ctx;
+    while (n > 0)
+    {
+        int space = x->room - x->bufLen;
+        int take  = (n < space) ? n : space;
+        memcpy(x->buf + x->bufLen, s, (size_t)take);
+        x->bufLen += take; s += take; n -= take;
+        if (x->bufLen >= x->room)   // chunk full -> frame + send, advance to next
+        {
+            x->ep->sendPEChunk(*x->ci, x->hdr, x->hlen, x->numChunks, x->chunk, x->buf, (uint16_t)x->bufLen);
+            x->chunk++; x->bufLen = 0; x->room = x->roomN;
+        }
+    }
+}
+
+void UMP_Endpoint::sendPEChunk(const MIDICI &ci, const char *hdr, int hlen, uint16_t numChunks,
+                               uint16_t chunk, const uint8_t *body, uint16_t len)
+{
+    uint16_t n = CIMessage::sendPEGetReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID, ci.requestId,
+                                           (chunk == 1) ? (uint16_t)hlen : 0, (uint8_t *)hdr,
+                                           numChunks, chunk, len, (uint8_t *)body);
+    sendCISysex(ci.umpGroup, peSysex_, n);
+}
+
+// Two-pass streamed ResourceList reply: count the body, then emit it straight into PE
+// chunks — never staging the whole body, so it scales to any number of resources.
+void UMP_Endpoint::streamResourceListReply(const MIDICI &ci, uint16_t status)
+{
+    char hdr[24];
+    int  hlen = snprintf(hdr, sizeof(hdr), "{\"status\":%u}", (unsigned)status);
+    if (hlen < 0 || hlen >= (int)sizeof(hdr)) return;
+
+    PECountCtx cc = { 0 };                       // pass 1: total body length
+    genResourceList(peCountEmit, &cc);
+    int bodyLen = cc.total;
+
+    int cap   = (peerMaxSysex_ < PE_OUT_MSG_CAP) ? peerMaxSysex_ : PE_OUT_MSG_CAP;
+    int room1 = cap - PE_MSG_FIXED - hlen;       // chunk 1 also carries the header
+    int roomN = cap - PE_MSG_FIXED;
+    if (room1 < 1) room1 = 1;
+    if (roomN < 1) roomN = 1;
+    if (room1 > (int)sizeof(peChunk_)) room1 = (int)sizeof(peChunk_);
+    if (roomN > (int)sizeof(peChunk_)) roomN = (int)sizeof(peChunk_);
+
+    uint16_t numChunks = 1;
+    if (bodyLen > room1) numChunks = (uint16_t)(1 + (bodyLen - room1 + roomN - 1) / roomN);
+
+    PEChunkCtx x = { this, &ci, hdr, hlen, numChunks, 1, room1, roomN, peChunk_, 0, room1 };
+    genResourceList(peChunkEmit, &x);            // pass 2: emit into chunks
+    // flush the final chunk (partial, or the sole empty chunk for an empty body)
+    if (x.chunk <= numChunks) sendPEChunk(ci, hdr, hlen, numChunks, x.chunk, peChunk_, (uint16_t)x.bufLen);
 }
 
 #endif // ENABLE_MIDI2
