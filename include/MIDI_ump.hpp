@@ -148,6 +148,7 @@ struct UMP_PEResource
     UMP_PEGetFn        get;         ///< escape-hatch Get (used iff fields==nullptr)
     UMP_PESetFn        set;         ///< escape-hatch Set (used iff fields==nullptr)
     const char        *schema;      ///< explicit schema; else derived from fields
+    bool               subscribable; ///< advertise "canSubscribe" and push PE notifications on change
 };
 
 class UMP_Endpoint;   // forward declaration for the profile callbacks below
@@ -210,6 +211,14 @@ public:
     /// Valid only from within a UMP_Profile::onSpecificData callback.
     void replyProfileData(const uint8_t *data, uint16_t len);
 
+    /// Send a device-initiated Profile Specific Data message for profile `id` to the
+    /// host that enabled it (the initiator MUID captured at Set Profile On). The
+    /// payload is opaque to the library — a profile-specific report the application
+    /// builds. Returns false if the profile is unknown, not enabled, or has no known
+    /// initiator. Used for profiles that push unsolicited reports (e.g. "the set
+    /// changed"). Generic: the library carries no knowledge of any specific profile.
+    bool sendProfileSpecificData(const uint8_t id[5], const uint8_t *data, uint16_t len);
+
     /// Device-initiated profile enable/disable (e.g. from a local UI/event), not
     /// a host Set Profile On/Off. numChannels 0 = disable; >0 = enable (the
     /// profile's onEnable may override the count). When `notify`, the engine
@@ -250,19 +259,19 @@ public:
     //      other outbound UMP and flushed by poll().
     //
     // Note On/Off carry an optional Attribute (type + 16-bit data): 0x00 none
-    // (default), 0x03 Pitch 7.9, or a Profile-defined type such as the Drums
-    // Profile's 0x20 (4-bit gesture | 12-bit distance-from-center). A receiver
-    // that does not understand the attribute type ignores the attribute data.
+    // (default), 0x03 Pitch 7.9, or a Profile-defined type (the meaning of the type
+    // and its 16-bit data is defined by whichever MIDI-CI Profile is active). A
+    // receiver that does not understand the attribute type ignores the attribute data.
     void sendNoteOn(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity,
                     uint8_t attrType = 0, uint16_t attrData = 0);
     void sendNoteOff(uint8_t group, uint8_t channel, uint8_t note, uint16_t velocity,
                      uint8_t attrType = 0, uint16_t attrData = 0);
     void sendPolyPressure(uint8_t group, uint8_t channel, uint8_t note, uint32_t pressure);
 
-    /// Registered Per-Note Controller (MT 0x4). `index` is the RPNC number (e.g.
-    /// the Drums Profile's 0x74 Position Angle / 0x73 Distance / 0x70-0x72), and
-    /// `value` is the full 32-bit controller value. Per MIDI 2.0, may be sent
-    /// before the Note On to pre-arm the value for the upcoming note.
+    /// Registered Per-Note Controller (MT 0x4). `index` is the RPNC number (its
+    /// meaning is defined by the active MIDI-CI Profile / application), and `value`
+    /// is the full 32-bit controller value. Per MIDI 2.0, may be sent before the Note
+    /// On to pre-arm the value for the upcoming note.
     void sendPerNoteRPN(uint8_t group, uint8_t channel, uint8_t note, uint8_t index, uint32_t value);
 
     /// Per-Note Pitch Bend (MT 0x4), 32-bit centred at 0x80000000.
@@ -282,6 +291,14 @@ public:
     /// For product SysEx (KMI app messages, tether, debug, Identity reply) over
     /// UMP; the same packer MIDI-CI uses internally.
     void sendSysex7(uint8_t group, const uint8_t *body, uint16_t len);
+
+    /// Push a Property Exchange subscription notification for `resourceName` to every
+    /// current subscriber (a device-initiated "full" update carrying the resource's
+    /// present value). Call this whenever the resource's backing data changes by ANY
+    /// path (host Set, local control, recompute). No-op if there is no MIDI-CI session
+    /// yet or no active subscriber. The resource must be registered and marked
+    /// `subscribable`. Queued like any other reply and flushed by poll().
+    void notifyPropertyChanged(const char *resourceName);
 
 private:
     void onEndpointDiscovery(uint8_t majVer, uint8_t minVer, uint8_t filter);
@@ -311,6 +328,8 @@ private:
                               const uint8_t *body, uint16_t bodyLen, bool lastByteOfSet); ///< PE Set (reassemble + apply)
     void     sendPEReply(const MIDICI &ci, uint16_t status, const uint8_t *body, uint16_t bodyLen); ///< PE Get Reply (1 chunk)
     void     sendPESetReplyStatus(const MIDICI &ci, uint16_t status); ///< PE Set Reply (status header only)
+    void     onCIPESubInquiry(const MIDICI &ci, const char *header, uint16_t headerLen); ///< PE Subscription start/end
+    void     sendPESubReplyStatus(const MIDICI &ci, uint16_t status);  ///< PE Subscription Reply (status header only)
     const UMP_PEResource *findPEResource(const char *name, uint16_t nameLen); ///< product-table lookup
     int      buildDeviceInfoJSON(char *out, int cap);     ///< foundational resource: DeviceInfo
     int      buildChannelListJSON(char *out, int cap);    ///< foundational resource: ChannelList
@@ -359,6 +378,7 @@ private:
     const UMP_Profile    *profiles_     = nullptr;
     uint8_t               profileCount_ = 0;
     uint8_t               profileChannels_[UMP_MAX_PROFILES] = { 0 }; ///< 0 = disabled, else channels
+    uint32_t              profileInitiator_[UMP_MAX_PROFILES] = { 0 }; ///< MUID that enabled each profile (0 = none) — dest for pushed reports
     // "Current" profile context for replyProfileData(), set during a Specific-Data callback.
     uint8_t               curProfileId_[5]      = { 0 };
     uint8_t               curProfileCiVer_      = 2;
@@ -376,6 +396,17 @@ private:
     uint8_t     peSysex_[1280];
     uint8_t     peSetBuf_[1024];
     uint16_t    peSetLen_ = 0;
+
+    // ---- Property Exchange Subscriptions (device pushes "full" updates) --------
+    // A subscriber sends command "start"; we assign a subscribeId, track it here,
+    // and push a "full" notification (the current resource body) whenever the
+    // product calls notifyPropertyChanged(). "end" removes the entry. Small fixed
+    // table — a handful of hosts is plenty for an instrument.
+    struct PESub { uint32_t muid; const UMP_PEResource *res; uint8_t ciVer; bool active; char id[8]; };
+    static const uint8_t UMP_MAX_PE_SUBS = 4;
+    PESub    peSubs_[UMP_MAX_PE_SUBS] = {};
+    uint8_t  peSubSeq_      = 0;   ///< subscribeId generator (1..255)
+    uint8_t  peNotifyReqId_ = 0;   ///< PE requestId for device-initiated notifications (1..127)
 
     const UMP_FunctionBlock *fbs_     = nullptr;
     uint8_t                  fbCount_ = 0;

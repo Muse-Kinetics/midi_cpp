@@ -72,8 +72,8 @@ namespace
     // (Protocol Negotiation was 0x01 in CI 1.1, deprecated in 1.2 — protocol is
     // negotiated via the UMP Stream Configuration path in M2).
     //  - Profile Configuration must NOT be advertised until at least one Profile
-    //    exists (a Profile-Inquiry reply must list >=1 Profile). Drums Profile
-    //    registers in M6; OR in CI_CAT_PROFILE then.
+    //    exists (a Profile-Inquiry reply must list >=1 Profile) — i.e. once the
+    //    application has registered profiles via setProfiles().
     constexpr uint8_t  CI_CAT_PROFILE   = 0x04;   // (advertised starting M6)
     constexpr uint8_t  CI_CAT_PROPERTY  = 0x08;
     constexpr uint8_t  CI_CAT_PROCESS   = 0x10;   // (unused)
@@ -633,8 +633,8 @@ void UMP_Endpoint::onStreamConfigRequest(uint8_t protocol, bool jrrx, bool jrtx)
 //  MIDI-CI (Capability Inquiry) — generic, Profile-pluggable (M5)
 //  Runs on the single Function Block. Fed MIDI-CI SysEx from the UMP transport
 //  (SysEx7), it answers Discovery, Profile Inquiry, and PE Capabilities. The
-//  Profile registry and PE resources are intentionally empty here — Drums
-//  Profile registers in M6 and PE resources arrive in M5 step 5.
+//  Profile registry and PE resources are supplied by the application (setProfiles /
+//  setPEResources); the library itself registers none.
 // ============================================================================
 
 // Draw a fresh 28-bit MUID. Common Rules for MIDI-CI require the MUID to be
@@ -710,6 +710,14 @@ void UMP_Endpoint::initCI()
                                    bool /*lastByteOfChunk*/, bool lastByteOfSet)
                             { onCIPESetInquiry(ci, header.c_str(), (uint16_t)header.size(),
                                                body, bodyLen, lastByteOfSet); });
+
+    // PE Subscription (0x38): a host subscribes ("start") / unsubscribes ("end").
+    // The body (if any) is ignored for start/end — the command + subscribeId live in
+    // the header. Subscriber acks of our pushes arrive as PE Subscription Reply
+    // (0x39) which we don't need to act on, so it's left unwired.
+    ci_.setRecvPESubInquiry([this](MIDICI ci, std::string header, uint16_t /*bodyLen*/, uint8_t * /*body*/,
+                                   bool /*lastByteOfChunk*/, bool /*lastByteOfSet*/)
+                            { onCIPESubInquiry(ci, header.c_str(), (uint16_t)header.size()); });
 
     // Route reassembled UMP SysEx7 into the CI processor.
     ump_.setSysEx([this](umpData mess) { routeSysEx7(mess); });
@@ -911,7 +919,8 @@ void UMP_Endpoint::onCIProfileOn(const MIDICI &ci, const uint8_t id[5], uint8_t 
     {
         ch = profiles_[idx].onEnable(numChannels, profiles_[idx].ctx);
     }
-    profileChannels_[idx] = ch;
+    profileChannels_[idx]  = ch;
+    profileInitiator_[idx] = (ch > 0) ? ci.remoteMUID : 0;   // dest for pushed profile reports
 
     uint8_t  sx[32];
     uint16_t len = (ch > 0)
@@ -934,7 +943,8 @@ void UMP_Endpoint::onCIProfileOff(const MIDICI &ci, const uint8_t id[5])
     {
         profiles_[idx].onDisable(profiles_[idx].ctx);
     }
-    profileChannels_[idx] = 0;
+    profileChannels_[idx]  = 0;
+    profileInitiator_[idx] = 0;
 
     uint8_t  sx[32];
     uint16_t len = CIMessage::sendProfileDisabled(sx, ci.ciVer, localMUID_, ci.remoteMUID,
@@ -1023,6 +1033,22 @@ void UMP_Endpoint::replyProfileData(const uint8_t *data, uint16_t len)
                                                     curProfileRemoteMUID_, curProfileDeviceId_,
                                                     idArray(curProfileId_), len, (uint8_t *)data);
     sendCISysex(curProfileGroup_, peSysex_, n);
+}
+
+// Send a device-initiated Profile Specific Data message for `id` to the host that
+// enabled the profile (initiator MUID captured at Set Profile On). Generic: the
+// payload is an opaque, profile-specific report built by the application. No-op if
+// the profile is unknown, disabled, or has no known initiator.
+bool UMP_Endpoint::sendProfileSpecificData(const uint8_t id[5], const uint8_t *data, uint16_t len)
+{
+    int8_t idx = profileIndex(id);
+    if (idx < 0 || !muidValid_ || profileChannels_[idx] == 0) return false;
+    uint32_t dest = profileInitiator_[idx];
+    if (dest == 0) return false;
+    uint16_t n = CIMessage::sendProfileSpecificData(peSysex_, FB_MIDICI_SUPPORT, localMUID_, dest,
+                                                    profiles_[idx].address, idArray(id), len, (uint8_t *)data);
+    sendCISysex(/*group*/ 0, peSysex_, n);
+    return true;
 }
 
 // PE Capabilities Inquiry -> Reply (handshake). Advertises how many simultaneous
@@ -1216,6 +1242,126 @@ void UMP_Endpoint::sendPESetReplyStatus(const MIDICI &ci, uint16_t status)
     sendCISysex(ci.umpGroup, peSysex_, n);
 }
 
+// PE Subscription Reply: status-only header, no subscribeId (used for rejects and
+// "end" acks; the "start" success reply carries a subscribeId and is built inline).
+void UMP_Endpoint::sendPESubReplyStatus(const MIDICI &ci, uint16_t status)
+{
+    char hdr[24];
+    int  hlen = snprintf(hdr, sizeof(hdr), "{\"status\":%u}", (unsigned)status);
+    if (hlen < 0 || hlen >= (int)sizeof(hdr))
+    {
+        return;
+    }
+    uint16_t n = CIMessage::sendPESubReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
+                                           ci.requestId, (uint16_t)hlen, (uint8_t *)hdr);
+    sendCISysex(ci.umpGroup, peSysex_, n);
+}
+
+// PE Subscription: a host subscribes to a resource with command "start" (we assign
+// a subscribeId and remember the subscriber) or "end" (we drop it). Later changes
+// are pushed by notifyPropertyChanged(). The "partial"/"full"/"notify" commands are
+// what WE send to subscribers, so they are not expected inbound here.
+void UMP_Endpoint::onCIPESubInquiry(const MIDICI &ci, const char *header, uint16_t headerLen)
+{
+    char cmd[12] = { 0 };
+    jsonFindStr(header, (int)headerLen, "command", cmd, (int)sizeof(cmd));
+
+    if (strcmp(cmd, "start") == 0)
+    {
+        const char *name    = nullptr;
+        uint16_t    nameLen  = 0;
+        const UMP_PEResource *r = peExtractName(header, headerLen, &name, &nameLen)
+                                      ? findPEResource(name, nameLen)
+                                      : nullptr;
+        if (r == nullptr || !r->subscribable)
+        {
+            sendPESubReplyStatus(ci, MIDICI_PE_STATUS_RESOURCE_NOT_ALLOWED);      // 405
+            return;
+        }
+
+        // Reuse an existing subscription for this host+resource, else take a free slot.
+        PESub *slot = nullptr;
+        for (PESub &s : peSubs_)
+        {
+            if (s.active && s.muid == ci.remoteMUID && s.res == r) { slot = &s; break; }
+        }
+        if (slot == nullptr)
+        {
+            for (PESub &s : peSubs_) { if (!s.active) { slot = &s; break; } }
+        }
+        if (slot == nullptr)
+        {
+            sendPESubReplyStatus(ci, 507);   // Insufficient resources (subscription table full)
+            return;
+        }
+
+        slot->active = true;
+        slot->muid   = ci.remoteMUID;
+        slot->res    = r;
+        slot->ciVer  = ci.ciVer;
+        if (++peSubSeq_ == 0) peSubSeq_ = 1;
+        snprintf(slot->id, sizeof(slot->id), "s%u", (unsigned)peSubSeq_);
+
+        char hdr[48];
+        int  hl = snprintf(hdr, sizeof(hdr), "{\"status\":200,\"subscribeId\":\"%s\"}", slot->id);
+        if (hl < 0 || hl >= (int)sizeof(hdr)) { slot->active = false; return; }
+        uint16_t n = CIMessage::sendPESubReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
+                                               ci.requestId, (uint16_t)hl, (uint8_t *)hdr);
+        sendCISysex(ci.umpGroup, peSysex_, n);
+    }
+    else if (strcmp(cmd, "end") == 0)
+    {
+        char sid[8] = { 0 };
+        jsonFindStr(header, (int)headerLen, "subscribeId", sid, (int)sizeof(sid));
+        for (PESub &s : peSubs_)
+        {
+            if (s.active && s.muid == ci.remoteMUID && strcmp(s.id, sid) == 0) s.active = false;
+        }
+        sendPESubReplyStatus(ci, PE_STATUS_OK);   // 200
+    }
+    // Any other command is subscriber-directed; ignore if seen inbound.
+}
+
+// Push a "full" subscription notification for `resourceName` to every active
+// subscriber. Called by the product whenever the resource's backing data changes
+// (host Set, local control, recompute). Builds the current body once and sends a
+// PE Subscription (0x38, command "full") to each subscriber. Single-chunk: the
+// subscribable resources here fit one PE message; a large property would need the
+// same chunking sendPEReply() does.
+void UMP_Endpoint::notifyPropertyChanged(const char *resourceName)
+{
+    if (!muidValid_ || resourceName == nullptr) return;
+
+    const UMP_PEResource *r = findPEResource(resourceName, (uint16_t)strlen(resourceName));
+    if (r == nullptr) return;
+
+    bool any = false;
+    for (const PESub &s : peSubs_) { if (s.active && s.res == r) { any = true; break; } }
+    if (!any) return;
+
+    int bodyLen = (r->fields != nullptr)
+                      ? serializeFields(r->fields, r->fieldCount, peJson_, (int)sizeof(peJson_))
+                      : (r->get != nullptr ? r->get(peJson_, (int)sizeof(peJson_), r->ctx) : -1);
+    if (bodyLen < 0) return;
+
+    for (PESub &s : peSubs_)
+    {
+        if (!s.active || s.res != r) continue;
+
+        char hdr[48];
+        int  hl = snprintf(hdr, sizeof(hdr), "{\"command\":\"full\",\"subscribeId\":\"%s\"}", s.id);
+        if (hl < 0 || hl >= (int)sizeof(hdr)) continue;
+
+        peNotifyReqId_ = (uint8_t)((peNotifyReqId_ + 1) & 0x7F);
+        if (peNotifyReqId_ == 0) peNotifyReqId_ = 1;
+
+        uint16_t n = CIMessage::sendPESub(peSysex_, s.ciVer, localMUID_, s.muid, peNotifyReqId_,
+                                          (uint16_t)hl, (uint8_t *)hdr, 1, 1,
+                                          (uint16_t)bodyLen, (uint8_t *)peJson_);
+        sendCISysex(/*group*/ 0, peSysex_, n);
+    }
+}
+
 // Foundational resource: DeviceInfo (M2-105). Numeric ids come from device
 // metadata; human names from the endpoint/manufacturer strings; version from the
 // same 4 bytes as the UMP Device Identity — no magic numbers.
@@ -1277,6 +1423,13 @@ int UMP_Endpoint::buildResourceListJSON(char *out, int cap)
         if (settable)
         {
             m = snprintf(out + n, (size_t)(cap - n), ",\"canSet\":\"full\"");
+            if (m < 0 || m >= cap - n) return -1;
+            n += m;
+        }
+
+        if (r.subscribable)
+        {
+            m = snprintf(out + n, (size_t)(cap - n), ",\"canSubscribe\":true");
             if (m < 0 || m >= cap - n) return -1;
             n += m;
         }
