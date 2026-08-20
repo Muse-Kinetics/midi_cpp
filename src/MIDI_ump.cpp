@@ -92,7 +92,10 @@ namespace
     // chunk 1 only). Each chunk's wire size is capped at min(initiator max SysEx,
     // our build budget) so it fits both the receiver and our peSysex_ buffer.
     constexpr uint16_t PE_MSG_FIXED   = 24;    // F0..F7 framing + PE fixed fields
-    constexpr uint16_t PE_OUT_MSG_CAP = 1024;  // per-chunk wire cap (<= peSysex_)
+    // Per-chunk wire cap -- must stay <= sizeof(peSysex_). Ties to UMP_PE_SYSEX_BYTES
+    // (MIDI_ump.hpp, overridable via MIDI_CPP_config.hpp) preserving the original
+    // 256-byte encoding-overhead margin (default: 1280 - 256 = 1024, unchanged).
+    constexpr uint16_t PE_OUT_MSG_CAP = UMP_PE_SYSEX_BYTES - 256;
 
     // Extract the "resource" value span from a Restricted-JSON PE header
     // (Contribution 16: {"resource":"<name>"[,"option":...]}). Resolving the name
@@ -1212,6 +1215,11 @@ void UMP_Endpoint::sendPEReply(const MIDICI &ci, uint16_t status, const uint8_t 
 
     // Body room per chunk: chunk 1 also carries the header; chunks 2..N do not.
     uint16_t cap   = (peerMaxSysex_ < PE_OUT_MSG_CAP) ? peerMaxSysex_ : PE_OUT_MSG_CAP;
+    // Explicit belt-and-suspenders clamp against the actual buffer CIMessage::
+    // sendPEGetReply() writes into (peSysex_) -- mirrors streamResourceListReply()'s
+    // equivalent sizeof(peChunk_) clamp -- independent of whether PE_OUT_MSG_CAP's
+    // derivation above stays in sync with a future UMP_PE_SYSEX_BYTES override.
+    if (cap > (uint16_t)sizeof(peSysex_)) cap = (uint16_t)sizeof(peSysex_);
     int      room1 = (int)cap - PE_MSG_FIXED - hlen;
     int      roomN = (int)cap - PE_MSG_FIXED;
     if (room1 < 1) room1 = 1;
@@ -1234,6 +1242,12 @@ void UMP_Endpoint::sendPEReply(const MIDICI &ci, uint16_t status, const uint8_t 
             first ? (uint16_t)hlen : 0, (uint8_t *)hdr,
             numChunks, chunk, thisLen, (uint8_t *)(b + off));
         sendCISysex(ci.umpGroup, peSysex_, n);
+        // Drain txBuf_ after each chunk instead of letting a multi-chunk reply
+        // accumulate whole before poll() next flushes -- keeps txBuf_'s peak
+        // usage to ~1 chunk instead of the entire reply, and avoids silently
+        // truncating a reply whose total UMP encoding exceeds TX_BUF_BYTES
+        // (queueUMP() drops on overflow; see mimic_hub decisions.md 2026-08-19).
+        flushTx();
         off += thisLen;
     }
 }
@@ -1369,6 +1383,10 @@ void UMP_Endpoint::notifyPropertyChanged(const char *resourceName)
                                           (uint16_t)hl, (uint8_t *)hdr, 1, 1,
                                           (uint16_t)bodyLen, (uint8_t *)peJson_);
         sendCISysex(/*group*/ 0, peSysex_, n);
+        // Same reasoning as sendPEReply()/sendPEChunk(): drain per-subscriber
+        // instead of accumulating all subscribers' notifications in txBuf_ at
+        // once, which could exceed TX_BUF_BYTES with enough active subscribers.
+        flushTx();
     }
 }
 
@@ -1475,6 +1493,9 @@ void UMP_Endpoint::sendPEChunk(const MIDICI &ci, const char *hdr, int hlen, uint
                                            (chunk == 1) ? (uint16_t)hlen : 0, (uint8_t *)hdr,
                                            numChunks, chunk, len, (uint8_t *)body);
     sendCISysex(ci.umpGroup, peSysex_, n);
+    // See sendPEReply()'s matching comment -- same reasoning applies to the
+    // streamed ResourceList path (streamResourceListReply -> peChunkEmit -> here).
+    flushTx();
 }
 
 // Two-pass streamed ResourceList reply: count the body, then emit it straight into PE

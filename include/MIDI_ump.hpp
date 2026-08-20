@@ -48,6 +48,38 @@
 #include <array>
 #include "umpProcessor.h"
 #include "midiCIProcessor.h"   // MIDI-CI (Capability Inquiry) on the Function Block
+// Pulls in MIDI_CPP_config.hpp (for the UMP_PE_*/UMP_TX_BUF_BYTES overrides
+// below) indirectly via MIDI_sysex.hpp, not directly -- MIDI_sysex.hpp <->
+// MIDI_device_metadata.hpp <-> MIDI_CPP_config.hpp is a pre-existing circular
+// include that only resolves correctly when MIDI_sysex.hpp is the first of
+// the three entered in a translation unit (its own include guard is what
+// breaks the cycle at the right point); including MIDI_CPP_config.hpp
+// directly here entered the cycle from the wrong side and left
+// SYX_TX_BLOCK_SIZE undefined when MIDI_sysex.hpp's class body needed it.
+#include "MIDI_sysex.hpp"
+
+// Property Exchange scratch buffer sizes -- override from MIDI_CPP_config.hpp
+// on RAM-constrained products (defaults below match the original, unconfigured
+// sizes so existing consumers are unaffected). Kept >= the MIDI-CI Common
+// Rules floor (Max SysEx Size >= 512 B whenever PE/Profiles are advertised).
+#ifndef UMP_PE_JSON_BYTES
+#define UMP_PE_JSON_BYTES 1280
+#endif
+#ifndef UMP_PE_SYSEX_BYTES
+#define UMP_PE_SYSEX_BYTES 1280
+#endif
+#ifndef UMP_PE_SETBUF_BYTES
+#define UMP_PE_SETBUF_BYTES 1024
+#endif
+#ifndef UMP_PE_CHUNK_BYTES
+#define UMP_PE_CHUNK_BYTES 1024
+#endif
+// Outbound UMP byte accumulator. Only needs to hold ~1 chunk's worth now that
+// flushTx() is called between chunks (see sendPEReply()/sendPEChunk() in
+// MIDI_ump.cpp) rather than the whole multi-chunk reply at once.
+#ifndef UMP_TX_BUF_BYTES
+#define UMP_TX_BUF_BYTES 2048
+#endif
 
 /// Transport emit callback: send `len` bytes of an already-packed UMP packet
 /// (little-endian words). Return true if accepted/queued, false if the transport
@@ -408,10 +440,10 @@ private:
     // needs a whole-body buffer. peSysex_ holds one framed CI SysEx chunk; peSetBuf_
     // reassembles an inbound Set body across the CI processor's <=256-byte slices;
     // peChunk_ accumulates one outgoing PE chunk during streaming.
-    char        peJson_[1280];
-    uint8_t     peSysex_[1280];
-    uint8_t     peSetBuf_[1024];
-    uint8_t     peChunk_[1024];   // one streamed PE chunk (<= peerMaxSysex - fixed)
+    char        peJson_[UMP_PE_JSON_BYTES];
+    uint8_t     peSysex_[UMP_PE_SYSEX_BYTES];
+    uint8_t     peSetBuf_[UMP_PE_SETBUF_BYTES];
+    uint8_t     peChunk_[UMP_PE_CHUNK_BYTES];   // one streamed PE chunk (<= peerMaxSysex - fixed)
     uint16_t    peSetLen_ = 0;
 
     // ---- Property Exchange Subscriptions (device pushes "full" updates) --------
@@ -443,7 +475,7 @@ private:
     // SysEx) packs to ~683 SysEx7 UMP bytes (8 bytes per 6 payload bytes), so
     // this is sized to 1 KB. flushTx() drains it across poll() passes as the USB
     // TX ring frees, but the whole message must fit here first.
-    static const uint16_t TX_BUF_BYTES = 2048;
+    static const uint16_t TX_BUF_BYTES = UMP_TX_BUF_BYTES;
     uint8_t  txBuf_[TX_BUF_BYTES];
     uint16_t txLen_ = 0;
 };
