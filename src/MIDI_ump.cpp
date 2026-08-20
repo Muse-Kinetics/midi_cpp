@@ -790,14 +790,14 @@ void UMP_Endpoint::routeSysEx7(const umpData &mess)
     {
         for (uint8_t i = 0; i < mess.dataLength; i++)
         {
-            if (appSxLen_ < APP_SX_BYTES) appSxBuf_[appSxLen_++] = mess.data[i];
+            if (appSxLen_ < APP_SX_BYTES) inboundArena_[appSxLen_++] = mess.data[i];
             else                          appSxOverflow_ = true;  // too large; drop whole message
         }
         if (end)
         {
             if (!appSxOverflow_ && appSink_ != nullptr)
             {
-                appSink_(appSxGroup_, appSxBuf_, appSxLen_);
+                appSink_(appSxGroup_, inboundArena_, appSxLen_);
             }
             appSxInProgress_ = false;
         }
@@ -1106,11 +1106,11 @@ void UMP_Endpoint::onCIPEGetInquiry(const MIDICI &ci, const char *header, uint16
     int bodyLen = -1;
     if (peNameIs(name, nameLen, "DeviceInfo"))
     {
-        bodyLen = buildDeviceInfoJSON(peJson_, (int)sizeof(peJson_));
+        bodyLen = buildDeviceInfoJSON((char *)bodyArena_, (int)sizeof(bodyArena_));
     }
     else if (peNameIs(name, nameLen, "ChannelList"))
     {
-        bodyLen = buildChannelListJSON(peJson_, (int)sizeof(peJson_));
+        bodyLen = buildChannelListJSON((char *)bodyArena_, (int)sizeof(bodyArena_));
     }
     else
     {
@@ -1119,11 +1119,11 @@ void UMP_Endpoint::onCIPEGetInquiry(const MIDICI &ci, const char *header, uint16
         {
             if (r->fields != nullptr)   // declarative
             {
-                bodyLen = serializeFields(r->fields, r->fieldCount, peJson_, (int)sizeof(peJson_));
+                bodyLen = serializeFields(r->fields, r->fieldCount, (char *)bodyArena_, (int)sizeof(bodyArena_));
             }
             else if (r->get != nullptr) // escape hatch
             {
-                bodyLen = r->get(peJson_, (int)sizeof(peJson_), r->ctx);
+                bodyLen = r->get((char *)bodyArena_, (int)sizeof(bodyArena_), r->ctx);
             }
         }
     }
@@ -1133,7 +1133,7 @@ void UMP_Endpoint::onCIPEGetInquiry(const MIDICI &ci, const char *header, uint16
         sendPEReply(ci, MIDICI_PE_STATUS_RESOURCE_UNSUPPORTED, nullptr, 0);   // 404
         return;
     }
-    sendPEReply(ci, PE_STATUS_OK, (const uint8_t *)peJson_, (uint16_t)bodyLen);
+    sendPEReply(ci, PE_STATUS_OK, bodyArena_, (uint16_t)bodyLen);
 }
 
 // PE Set Inquiry: reassemble the body across the CI processor's <=256-byte
@@ -1146,7 +1146,7 @@ void UMP_Endpoint::onCIPESetInquiry(const MIDICI &ci, const char *header, uint16
 {
     for (uint16_t i = 0; i < bodyLen; i++)
     {
-        if (peSetLen_ < sizeof(peSetBuf_)) peSetBuf_[peSetLen_++] = body[i];
+        if (peSetLen_ < sizeof(inboundArena_)) inboundArena_[peSetLen_++] = body[i];
     }
     if (!lastByteOfSet)
     {
@@ -1180,14 +1180,14 @@ void UMP_Endpoint::onCIPESetInquiry(const MIDICI &ci, const char *header, uint16
         }
         else
         {
-            applySetFields(*r, peSetBuf_, total);
+            applySetFields(*r, inboundArena_, total);
             bool ok = (r->onApplied == nullptr) || r->onApplied(r->ctx);
             status = ok ? PE_STATUS_OK : MIDICI_PE_STATUS_BAD_REQ;           // 200 / 400
         }
     }
     else if (r->set != nullptr)
     {
-        status = (uint16_t)r->set((const char *)peSetBuf_, total, r->ctx);
+        status = (uint16_t)r->set((const char *)inboundArena_, total, r->ctx);
     }
     else
     {
@@ -1217,7 +1217,7 @@ void UMP_Endpoint::sendPEReply(const MIDICI &ci, uint16_t status, const uint8_t 
     uint16_t cap   = (peerMaxSysex_ < PE_OUT_MSG_CAP) ? peerMaxSysex_ : PE_OUT_MSG_CAP;
     // Explicit belt-and-suspenders clamp against the actual buffer CIMessage::
     // sendPEGetReply() writes into (peSysex_) -- mirrors streamResourceListReply()'s
-    // equivalent sizeof(peChunk_) clamp -- independent of whether PE_OUT_MSG_CAP's
+    // equivalent sizeof(bodyArena_) clamp -- independent of whether PE_OUT_MSG_CAP's
     // derivation above stays in sync with a future UMP_PE_SYSEX_BYTES override.
     if (cap > (uint16_t)sizeof(peSysex_)) cap = (uint16_t)sizeof(peSysex_);
     int      room1 = (int)cap - PE_MSG_FIXED - hlen;
@@ -1364,8 +1364,8 @@ void UMP_Endpoint::notifyPropertyChanged(const char *resourceName)
     if (!any) return;
 
     int bodyLen = (r->fields != nullptr)
-                      ? serializeFields(r->fields, r->fieldCount, peJson_, (int)sizeof(peJson_))
-                      : (r->get != nullptr ? r->get(peJson_, (int)sizeof(peJson_), r->ctx) : -1);
+                      ? serializeFields(r->fields, r->fieldCount, (char *)bodyArena_, (int)sizeof(bodyArena_))
+                      : (r->get != nullptr ? r->get((char *)bodyArena_, (int)sizeof(bodyArena_), r->ctx) : -1);
     if (bodyLen < 0) return;
 
     for (PESub &s : peSubs_)
@@ -1381,7 +1381,7 @@ void UMP_Endpoint::notifyPropertyChanged(const char *resourceName)
 
         uint16_t n = CIMessage::sendPESub(peSysex_, s.ciVer, localMUID_, s.muid, peNotifyReqId_,
                                           (uint16_t)hl, (uint8_t *)hdr, 1, 1,
-                                          (uint16_t)bodyLen, (uint8_t *)peJson_);
+                                          (uint16_t)bodyLen, bodyArena_);
         sendCISysex(/*group*/ 0, peSysex_, n);
         // Same reasoning as sendPEReply()/sendPEChunk(): drain per-subscriber
         // instead of accumulating all subscribers' notifications in txBuf_ at
@@ -1515,16 +1515,16 @@ void UMP_Endpoint::streamResourceListReply(const MIDICI &ci, uint16_t status)
     int roomN = cap - PE_MSG_FIXED;
     if (room1 < 1) room1 = 1;
     if (roomN < 1) roomN = 1;
-    if (room1 > (int)sizeof(peChunk_)) room1 = (int)sizeof(peChunk_);
-    if (roomN > (int)sizeof(peChunk_)) roomN = (int)sizeof(peChunk_);
+    if (room1 > (int)sizeof(bodyArena_)) room1 = (int)sizeof(bodyArena_);
+    if (roomN > (int)sizeof(bodyArena_)) roomN = (int)sizeof(bodyArena_);
 
     uint16_t numChunks = 1;
     if (bodyLen > room1) numChunks = (uint16_t)(1 + (bodyLen - room1 + roomN - 1) / roomN);
 
-    PEChunkCtx x = { this, &ci, hdr, hlen, numChunks, 1, room1, roomN, peChunk_, 0, room1 };
+    PEChunkCtx x = { this, &ci, hdr, hlen, numChunks, 1, room1, roomN, bodyArena_, 0, room1 };
     genResourceList(peChunkEmit, &x);            // pass 2: emit into chunks
     // flush the final chunk (partial, or the sole empty chunk for an empty body)
-    if (x.chunk <= numChunks) sendPEChunk(ci, hdr, hlen, numChunks, x.chunk, peChunk_, (uint16_t)x.bufLen);
+    if (x.chunk <= numChunks) sendPEChunk(ci, hdr, hlen, numChunks, x.chunk, bodyArena_, (uint16_t)x.bufLen);
 }
 
 #endif // ENABLE_MIDI2

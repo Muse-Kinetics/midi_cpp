@@ -406,11 +406,10 @@ private:
     UMPAppSysexFn         appSink_         = nullptr;
     UMPProfileChangeFn    onProfileChange_ = nullptr;  ///< product hook for inbound profile on/off
     bool                  appSxInProgress_ = false;
-    bool                  appSxOverflow_   = false;  ///< body exceeded appSxBuf_; drop on end
+    bool                  appSxOverflow_   = false;  ///< body exceeded APP_SX_BYTES; drop on end
     uint8_t               appSxGroup_      = 0;
     uint16_t              appSxLen_        = 0;
     static const uint16_t APP_SX_BYTES     = 256;    ///< inbound app SysEx are small (EVENT_* commands, Identity)
-    uint8_t               appSxBuf_[APP_SX_BYTES];
 
     const char *endpointName_      = "";
     const char *productInstanceId_ = "";
@@ -432,18 +431,42 @@ private:
     uint8_t               curProfileGroup_      = 0;
     uint8_t               curProfileDeviceId_   = 0x7F;  ///< Device ID (address) of the in-flight profile transaction
 
-    // Property Exchange scratch. peJson_ stages a BOUNDED resource body (DeviceInfo,
-    // ChannelList, a resource's field values, or an escape-hatch get()) before
-    // sendPEReply chunks it for transmission. The ResourceList — which grows with the
-    // resource count — is NOT staged here: streamResourceListReply() generates it
-    // twice (count, then emit) straight into peChunk_-sized PE chunks, so it never
-    // needs a whole-body buffer. peSysex_ holds one framed CI SysEx chunk; peSetBuf_
-    // reassembles an inbound Set body across the CI processor's <=256-byte slices;
-    // peChunk_ accumulates one outgoing PE chunk during streaming.
-    char        peJson_[UMP_PE_JSON_BYTES];
+    // Property Exchange scratch, consolidated into two shared arenas (mimic_hub
+    // 2026-08-19: see .buddy-project/decisions.md "B2 -- shared-arena
+    // consolidation" for the full reasoning). Safe because this whole engine is
+    // single-threaded/non-reentrant (task context only -- rxFifo_ is the sole
+    // IRQ-touched buffer and stays standalone below) and, within any one PE
+    // transaction, each arena's two roles never execute concurrently:
+    //
+    // inboundArena_ (was appSxBuf_ + peSetBuf_): a SysEx7 stream in progress is
+    // either non-CI app SysEx (Identity etc., handled by appSink_) or a MIDI-CI
+    // Property Exchange Set body being reassembled -- never both at once.
+    //
+    // bodyArena_ (was peJson_ + peChunk_): peJson_'s role stages a BOUNDED
+    // resource body (DeviceInfo, ChannelList, a resource's field values, or an
+    // escape-hatch get()) before sendPEReply() chunks it into peSysex_ for
+    // transmission. peChunk_'s role accumulates one outgoing chunk while
+    // streamResourceListReply() generates the ResourceList (which grows with
+    // the resource count) straight into chunks, twice -- count pass then emit
+    // pass -- so it never needs a whole-body buffer. A single PE Get Inquiry
+    // dispatches to exactly one of these two roles (onCIPEGetInquiry(), an
+    // if/else chain), never both; notifyPropertyChanged() also uses the
+    // peJson_ role but, like every PE entry point here, only ever runs to
+    // completion within one synchronous call from poll() or the app -- never
+    // interleaved with a streamResourceListReply() in progress.
+    //
+    // peSysex_ (one framed CI SysEx chunk) is NOT merged into bodyArena_: it is
+    // the framed-wire encoding of whichever raw body bodyArena_ is currently
+    // holding, so producer and consumer are simultaneously live within one
+    // sendPEReply()/sendPEChunk() call -- collapsing them would clobber the
+    // input while encoding it.
+    static const uint16_t PE_INBOUND_ARENA_BYTES =
+        (APP_SX_BYTES > UMP_PE_SETBUF_BYTES) ? APP_SX_BYTES : UMP_PE_SETBUF_BYTES;
+    static const uint16_t PE_BODY_ARENA_BYTES =
+        (UMP_PE_JSON_BYTES > UMP_PE_CHUNK_BYTES) ? UMP_PE_JSON_BYTES : UMP_PE_CHUNK_BYTES;
+    uint8_t     inboundArena_[PE_INBOUND_ARENA_BYTES];
+    uint8_t     bodyArena_[PE_BODY_ARENA_BYTES];
     uint8_t     peSysex_[UMP_PE_SYSEX_BYTES];
-    uint8_t     peSetBuf_[UMP_PE_SETBUF_BYTES];
-    uint8_t     peChunk_[UMP_PE_CHUNK_BYTES];   // one streamed PE chunk (<= peerMaxSysex - fixed)
     uint16_t    peSetLen_ = 0;
 
     // ---- Property Exchange Subscriptions (device pushes "full" updates) --------
