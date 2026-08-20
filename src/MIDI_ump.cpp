@@ -875,6 +875,14 @@ void UMP_Endpoint::onCIDiscovery(const MIDICI &ci, uint16_t peerMaxSysex)
                                                  categories, CI_MAX_SYSEX,
                                                  CI_OUTPUT_PATH, CI_FB_INDEX);
     sendCISysex(ci.umpGroup, sx, len);
+    // Drain immediately: a host that broadcasts several CI requests back to back
+    // (e.g. Profile Inquiry addressed to every channel + group + Function Block,
+    // 18 messages in one batch) delivers them all before the next poll() -- without
+    // an per-reply flush here, all of poll()'s single accumulated flushTx() call
+    // can silently overflow/drop the later replies in the batch (same class of bug
+    // as the PE txBuf_ fix, decisions.md 2026-08-19; found live via Workbench for
+    // Profile Inquiry specifically, 2026-08-20 -- see decisions.md that date).
+    flushTx();
 }
 
 // ---- MIDI-CI Profile Configuration (generic Common-Rules envelope) ---------
@@ -908,6 +916,7 @@ void UMP_Endpoint::onCIProfileInquiry(const MIDICI &ci)
     uint16_t len = CIMessage::sendProfileListResponse(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                       ci.deviceId, ne, enabled, nd, disabled);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();   // see onCIDiscovery's comment: batched CI requests need a per-reply drain
 }
 
 // Set Profile On -> enable via the product callback, then notify Enabled/Disabled.
@@ -929,6 +938,7 @@ void UMP_Endpoint::onCIProfileOn(const MIDICI &ci, const uint8_t id[5], uint8_t 
         ? CIMessage::sendProfileEnabled(sx, ci.ciVer, localMUID_, ci.remoteMUID, ci.deviceId, idArray(id), ch)
         : CIMessage::sendProfileDisabled(sx, ci.ciVer, localMUID_, ci.remoteMUID, ci.deviceId, idArray(id), 0);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();
 
     // Let the product coordinate (e.g. disable a mutually-exclusive profile). The
     // hook may call setProfileEnabled() safely — that path does not re-enter here.
@@ -952,6 +962,7 @@ void UMP_Endpoint::onCIProfileOff(const MIDICI &ci, const uint8_t id[5])
     uint16_t len = CIMessage::sendProfileDisabled(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                   ci.deviceId, idArray(id), 0);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();
 
     if (onProfileChange_ != nullptr) onProfileChange_(id, false);
 }
@@ -989,6 +1000,7 @@ void UMP_Endpoint::setProfileEnabled(const uint8_t id[5], uint8_t numChannels, b
         : CIMessage::sendProfileDisabled(sx, FB_MIDICI_SUPPORT, localMUID_, M2_CI_BROADCAST,
                                          deviceId, idArray(id), 0);
     sendCISysex(/*group*/ 0, sx, len);   // single Function Block on UMP group 0
+    flushTx();
 }
 
 // Profile Details Inquiry -> Reply. The reply payload is profile-specific and
@@ -1010,6 +1022,7 @@ void UMP_Endpoint::onCIProfileDetailsInquiry(const MIDICI &ci, const uint8_t id[
     uint16_t len = CIMessage::sendProfileDetailsReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                       ci.deviceId, idArray(id), target, (uint16_t)dl, data);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();
 }
 
 // Profile Specific Data -> hand the opaque payload to the product callback, which
@@ -1044,6 +1057,7 @@ void UMP_Endpoint::replyProfileData(const uint8_t *data, uint16_t len)
                                                     curProfileRemoteMUID_, curProfileDeviceId_,
                                                     idArray(curProfileId_), len, (uint8_t *)data);
     sendCISysex(curProfileGroup_, peSysex_, n);
+    flushTx();
 }
 
 // Send a device-initiated Profile Specific Data message for `id` to the host that
@@ -1059,6 +1073,7 @@ bool UMP_Endpoint::sendProfileSpecificData(const uint8_t id[5], const uint8_t *d
     uint16_t n = CIMessage::sendProfileSpecificData(peSysex_, FB_MIDICI_SUPPORT, localMUID_, dest,
                                                     profiles_[idx].address, idArray(id), len, (uint8_t *)data);
     sendCISysex(/*group*/ 0, peSysex_, n);
+    flushTx();
     return true;
 }
 
@@ -1070,6 +1085,7 @@ void UMP_Endpoint::onCIPECapabilities(const MIDICI &ci)
     uint16_t len = CIMessage::sendPECapabilityReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                     PE_SIMUL_REQUESTS, PE_MAJ_VER, PE_MIN_VER);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();
 }
 
 // ---- Property Exchange Get (M5 step 5) -------------------------------------
@@ -1264,6 +1280,7 @@ void UMP_Endpoint::sendPESetReplyStatus(const MIDICI &ci, uint16_t status)
     uint16_t n = CIMessage::sendPESetReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
                                            ci.requestId, (uint16_t)hlen, (uint8_t *)hdr);
     sendCISysex(ci.umpGroup, peSysex_, n);
+    flushTx();
 }
 
 // PE Subscription Reply: status-only header, no subscribeId (used for rejects and
@@ -1279,6 +1296,7 @@ void UMP_Endpoint::sendPESubReplyStatus(const MIDICI &ci, uint16_t status)
     uint16_t n = CIMessage::sendPESubReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
                                            ci.requestId, (uint16_t)hlen, (uint8_t *)hdr);
     sendCISysex(ci.umpGroup, peSysex_, n);
+    flushTx();
 }
 
 // PE Subscription: a host subscribes to a resource with command "start" (we assign
@@ -1332,6 +1350,7 @@ void UMP_Endpoint::onCIPESubInquiry(const MIDICI &ci, const char *header, uint16
         uint16_t n = CIMessage::sendPESubReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
                                                ci.requestId, (uint16_t)hl, (uint8_t *)hdr);
         sendCISysex(ci.umpGroup, peSysex_, n);
+        flushTx();
     }
     else if (strcmp(cmd, "end") == 0)
     {
