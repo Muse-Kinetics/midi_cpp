@@ -228,6 +228,12 @@ class SysExMessageTX {
         int16_t sendSysExIDRequest();
         int16_t sendSysExIDReply();
         int16_t sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t* ptr, uint16_t length);
+        // Overload: encode an optional small header segment (e.g. a slot/index byte) immediately
+        // before the main payload, under one CRC. Lets callers stream the body straight from flash
+        // or a live RAM object with no intermediate copy. header may be nullptr when headerLen == 0.
+        int16_t sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type,
+                                        const uint8_t* header, uint16_t headerLen,
+                                        const uint8_t* ptr, uint16_t length);
         int16_t sendSyxUnEncodedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t* ptr, uint16_t length);
 
         uint8_t* getData() { return buffer; };

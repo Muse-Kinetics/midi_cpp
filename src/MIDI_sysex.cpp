@@ -241,16 +241,28 @@ int16_t SysExMessageTX::sendSyxUnEncodedMessage(uint8_t targetPID, uint8_t categ
 // Note2: Products like SoftStep and 12Step would send multiple presets (packets) with a single preamble, see "LENGTH OF NEXT PACKET" below.
 // Multiple packets are not currently implemented in this library.
 int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t* ptr, uint16_t length)
-{  
+{
+    // Delegate to the header-aware overload with no header segment. With headerLen == 0 this
+    // produces byte-identical output to the original single-buffer implementation.
+    return sendSyxFormattedMessage(targetPID, category, type, nullptr, 0, ptr, length);
+}
+
+int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type,
+                                                const uint8_t* header, uint16_t headerLen,
+                                                const uint8_t* ptr, uint16_t length)
+{
 	if (!cb_tx_Send)
-    	return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION; 
+    	return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION;
 
 	building = true;  // Block timer interrupt from transmitting until complete
 
 	int returnCode = SYX_SEND_RETURN_CODE_OK;
 
+    // header + body are one contiguous CRC'd payload from the receiver's point of view
+    const uint16_t totalPayload = headerLen + length;
+
     makeSyxHeader(targetPID);
-    
+
     // begin 7/8bit encoding
     init_encode();
     init_crc();
@@ -258,13 +270,13 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
     // preamble
     encode_crc_char(category);            // message category
     encode_crc_char(type);               // message type
-    
-    encode_crc_int(length + 2 + 2); // this is the length of the payload, plus 2 for length of next packet (int), +2 for crc (int)
+
+    encode_crc_int(totalPayload + 2 + 2); // this is the length of the payload, plus 2 for length of next packet (int), +2 for crc (int)
     encode_int(crc);
-    
+
 
     // payload
-    if (length) 
+    if (totalPayload)
     {
         init_crc();
 
@@ -273,19 +285,20 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
             flush_encode(); // EM Pro Riser bootloader expects us to flush the encoding here, most other applications do not
         }
 
-        //returnCode = cb_tx_Send(context_tx, &buffer[0], size); // transmit the preamble before encoding data
-        //clear();
-        // if (returnCode != SYX_SEND_RETURN_CODE_OK)
-        //     return returnCode;
+        // optional header segment (e.g. a slot/index byte), then the body streamed from its source
+        for (uint16_t i = 0; i < headerLen; ++i)
+        {
+            returnCode = encode_crc_char(header[i]);
+            if (returnCode != SYX_SEND_RETURN_CODE_OK) { building = false; return returnCode; }
+        }
 
         while(length--)
         {
-            returnCode = encode_crc_char(*ptr++); 
+            returnCode = encode_crc_char(*ptr++);
 
-			if (returnCode != SYX_SEND_RETURN_CODE_OK)
-				return returnCode;
+			if (returnCode != SYX_SEND_RETURN_CODE_OK) { building = false; return returnCode; }
         }
-        
+
 		// LENGTH OF NEXT PACKET
         encode_crc_int(0);  // if 0 then this is the last packet, if something other than zero, we can
                             // send additional blocks of data, ie multiple presets
