@@ -839,7 +839,11 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 						}
 						else if (stream_tail_idx < 4)
 						{
-							// TAIL byte — accumulate into TAIL union (not CRC'd)
+							// TAIL layout: [uint16 next-length][uint16 crc].
+							// The first 2 bytes (next-length) are CRC'd by the sender;
+							// the last 2 bytes (the CRC field itself) are not.
+							if (stream_tail_idx < 2)
+								crc_byte(&stream_crc, sx_char);
 							stream_tail.raw[stream_tail_idx++] = sx_char;
 						}
 						// Any byte beyond the 4-byte TAIL before F7 is ignored.
