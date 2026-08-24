@@ -522,11 +522,13 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					uint16_t nextLen = (stream_tail_idx >= 2) ? SWAP_BYTES(stream_tail.fmt.length) : 0;
 					uint16_t rxCRC   = (stream_tail_idx >= 4) ? SWAP_BYTES(stream_tail.fmt.crc)    : 0;
 
-					if (nextLen > 0)
+					if (nextLen > 0 && cb_debugPrint)
 					{
 						// TODO: implement chained multi-packet streaming (see 8051 packet_data_init re-entry).
 						// For now, close the current stream and log that we dropped the remainder.
-						printf("[MIDI_CPP] WARN: stream packet has next_len=%u — multi-packet stream RX not implemented, remainder dropped\n", nextLen);
+						char warnMsg[80];
+						snprintf(warnMsg, sizeof(warnMsg), "SYX STREAM WARN: next_len=%u — multi-packet stream RX not yet supported", nextLen);
+						cb_debugPrint(context_dp, warnMsg);
 					}
 
 					bool crcOk = (stream_tail_idx == 4) && (stream_crc == rxCRC);
