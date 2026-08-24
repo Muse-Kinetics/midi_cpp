@@ -514,6 +514,34 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					}
 					break; // end CORE_SX_PACKET_DATA
 				}
+				case CORE_SX_PACKET_DATA_STREAM:
+				{
+					// TAIL union: fmt.length = next-packet length (>0 means another packet follows),
+					// fmt.crc = CRC of the payload just received.
+					// TODO: multi-packet stream RX is not yet implemented.
+					uint16_t nextLen = (stream_tail_idx >= 2) ? SWAP_BYTES(stream_tail.fmt.length) : 0;
+					uint16_t rxCRC   = (stream_tail_idx >= 4) ? SWAP_BYTES(stream_tail.fmt.crc)    : 0;
+
+					if (nextLen > 0)
+					{
+						// TODO: implement chained multi-packet streaming (see 8051 packet_data_init re-entry).
+						// For now, close the current stream and log that we dropped the remainder.
+						printf("[MIDI_CPP] WARN: stream packet has next_len=%u — multi-packet stream RX not implemented, remainder dropped\n", nextLen);
+					}
+
+					bool crcOk = (stream_tail_idx == 4) && (stream_crc == rxCRC);
+					if (!crcOk && cb_debugPrint)
+					{
+						char errMsg[80];
+						snprintf(errMsg, sizeof(errMsg), "SYX STREAM CRC FAIL - cat: %d, type: %d", preamble->category, preamble->type);
+						cb_debugPrint(context_dp, errMsg);
+					}
+
+					if (cb_rx_PacketDataStreamClose)
+						cb_rx_PacketDataStreamClose(context_rx, preamble->category, preamble->type, crcOk);
+
+					break; // end CORE_SX_PACKET_DATA_STREAM
+				}
 				case CORE_SX_RAW_DATA: // raw = unencoded
 				{
 					PACKET_PREAMBLE rawPreamble; // don't point to our buffer because our incoming message doesn't contain size or crc elements
@@ -706,10 +734,46 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 
 								//printf("[%s] CRC pass, proceed to CORE_SX_PACKET_DATA\n", name);
 								//printf("[%s] DECODED DATA: ", name);
-								// EB TODO: implement packet_data_init and packet_data_process
-								rx_state = CORE_SX_PACKET_DATA;
-								packet_data_index = preamble_index + sizeof(PACKET_PREAMBLE);
-								packet_data = &buffer[packet_data_index];
+
+								// net data bytes = preamble->length minus the 4-byte TAIL (2 length + 2 crc)
+								const uint16_t payloadDataLen = (preamble->length > 4) ? (preamble->length - 4) : 0;
+
+								// Attempt to hand the payload off to the streaming path first.
+								// Open returns true to claim it; false falls back to the buffer path.
+								// If the payload is larger than SYX_RX_BLOCK_SIZE and the app doesn't
+								// claim it, we must reject — there is no room to buffer it.
+								bool streamClaimed = false;
+								if (cb_rx_PacketDataStreamOpen)
+								{
+									streamClaimed = cb_rx_PacketDataStreamOpen(context_rx,
+									                                            preamble->category,
+									                                            preamble->type,
+									                                            payloadDataLen);
+								}
+
+								if (streamClaimed)
+								{
+									rx_state               = CORE_SX_PACKET_DATA_STREAM;
+									stream_bytes_remaining = payloadDataLen;
+									stream_payload_index   = 0;
+									stream_crc             = 0xFFFF;
+									stream_tail            = {};
+									stream_tail_idx        = 0;
+								}
+								else if (payloadDataLen + 4 > SYX_RX_BLOCK_SIZE)
+								{
+									// Payload too large to buffer and streaming was not claimed — reject.
+									if (cb_debugPrint)
+										cb_debugPrint(context_dp, "SYX: payload exceeds SYX_RX_BLOCK_SIZE, no stream handler claimed it — rejected");
+									rx_set_ignore();
+								}
+								else
+								{
+									rx_state = CORE_SX_PACKET_DATA;
+									packet_data_index = preamble_index + sizeof(PACKET_PREAMBLE);
+									packet_data = &buffer[packet_data_index];
+								}
+
 								init_crc();
 								rx_decode_count = 0; // reset the count
 								if (flushAfterPreamble == SYX_FLUSH_YES)
@@ -750,6 +814,35 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 						single(sx_char); // add decoded byte to message array/vector
 					}
 					break; // end CORE_SX_PACKET_DATA
+				}
+				case CORE_SX_PACKET_DATA_STREAM:
+				{
+					// Streaming path: decoded bytes are routed directly to the application via
+					// cb_rx_PacketDataStreamProcess instead of accumulating into buffer[].
+					// The 4-byte TAIL (uint16 next-length, uint16 crc) is consumed here and
+					// used for CRC verification at F7 — it is NOT passed to the app.
+					decode_put(sx_char);
+
+					while (decode_get(&sx_char))
+					{
+						if (stream_bytes_remaining > 0)
+						{
+							// Data byte — feed CRC and hand to application.
+							crc_byte(&stream_crc, sx_char);
+							if (cb_rx_PacketDataStreamProcess)
+								cb_rx_PacketDataStreamProcess(context_rx, preamble->category, preamble->type,
+								                              stream_payload_index, sx_char);
+							stream_payload_index++;
+							stream_bytes_remaining--;
+						}
+						else if (stream_tail_idx < 4)
+						{
+							// TAIL byte — accumulate into TAIL union (not CRC'd)
+							stream_tail.raw[stream_tail_idx++] = sx_char;
+						}
+						// Any byte beyond the 4-byte TAIL before F7 is ignored.
+					}
+					break; // end CORE_SX_PACKET_DATA_STREAM
 				}
 				case CORE_SX_RAW_DATA: // unencoded 7bit data
 				{

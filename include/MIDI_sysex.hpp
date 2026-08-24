@@ -74,6 +74,7 @@ enum SYX_RX_STATE
 	CORE_SX_PACKET_START_SEARCH,
 	CORE_SX_PACKET_PREAMBLE,
 	CORE_SX_PACKET_DATA,
+    CORE_SX_PACKET_DATA_STREAM, // streaming path: bypasses buffer accumulation, writes per-byte via callbacks
     CORE_SX_HOST_DATA,
     CORE_SX_RAW_DATA,
     CORE_SX_IGNORE
@@ -204,6 +205,16 @@ using PacketDataCallback = void (*)(void* ctx, PACKET_PREAMBLE* preamble, uint8_
 using IDReplyCallback = void (*)(void* ctx, SYSEX_DEVICE_INQUIRY_REPLY* reply);
 using DebugPrintCallback = void (*)(void* ctx, const char* string);
 
+// Streaming payload callbacks — bypasses the SYX_RX_BLOCK_SIZE accumulator.
+// Open:    called after preamble CRC passes. payloadLength is net data bytes (TAIL excluded).
+//          Return true to claim the stream; false falls back to the standard buffer path
+//          (if payloadLength > SYX_RX_BLOCK_SIZE and false is returned, the message is rejected).
+// Process: called once per decoded data byte. index counts only data bytes, not TAIL.
+// Close:   called at F7. crcOk indicates whether the payload CRC matched.
+using PacketDataStreamOpenCallback    = bool (*)(void* ctx, uint8_t category, uint8_t type, uint16_t payloadLength);
+using PacketDataStreamProcessCallback = void (*)(void* ctx, uint8_t category, uint8_t type, uint16_t index, uint8_t byte);
+using PacketDataStreamCloseCallback   = void (*)(void* ctx, uint8_t category, uint8_t type, bool crcOk);
+
 
 //----------------------------------------
 // TX Class
@@ -286,6 +297,9 @@ class SysExMessageRX {
         void setCB_rx_IDReply(IDReplyCallback cb) { cb_rx_id_reply = cb; }
         void setCB_rx_HostMessage(HostMessageCallback cb) { cb_rx_HostMessage = cb; }
         void setCB_rx_PacketData(PacketDataCallback cb) { cb_rx_PacketData = cb; }
+        void setCB_rx_PacketDataStreamOpen(PacketDataStreamOpenCallback cb)       { cb_rx_PacketDataStreamOpen    = cb; }
+        void setCB_rx_PacketDataStreamProcess(PacketDataStreamProcessCallback cb) { cb_rx_PacketDataStreamProcess = cb; }
+        void setCB_rx_PacketDataStreamClose(PacketDataStreamCloseCallback cb)     { cb_rx_PacketDataStreamClose   = cb; }
     
         void setSendPtr(SysExMessageTX* syxSend) { syxSendPtr = syxSend; }
         void rx_init();
@@ -343,7 +357,17 @@ class SysExMessageRX {
         IDReplyCallback cb_rx_id_reply = nullptr;
         HostMessageCallback cb_rx_HostMessage = nullptr;
         PacketDataCallback cb_rx_PacketData = nullptr;
+        PacketDataStreamOpenCallback    cb_rx_PacketDataStreamOpen    = nullptr;
+        PacketDataStreamProcessCallback cb_rx_PacketDataStreamProcess = nullptr;
+        PacketDataStreamCloseCallback   cb_rx_PacketDataStreamClose   = nullptr;
         DebugPrintCallback cb_debugPrint = nullptr;
+
+        // State for CORE_SX_PACKET_DATA_STREAM
+        uint16_t stream_bytes_remaining = 0; // data bytes left before TAIL
+        uint16_t stream_payload_index  = 0;  // passed to Process, counts data bytes only
+        uint16_t stream_crc            = 0xFFFF;
+        TAIL     stream_tail           = {};  // accumulates the 4-byte TAIL (fmt.length = next packet, fmt.crc = payload crc)
+        uint8_t  stream_tail_idx       = 0;
     
         
     };
