@@ -110,12 +110,32 @@ typedef void (*UMPAppSysexFn)(uint8_t group, const uint8_t *body, uint16_t len);
 /// disable a conflicting profile without recursing.
 typedef void (*UMPProfileChangeFn)(const uint8_t id[5], bool enabled);
 
+/// Hook invoked for every inbound Channel Voice message (MIDI 1.0-in-UMP
+/// MT 0x2, or native MIDI 2.0 MT 0x4) that reaches this endpoint's UMP
+/// processor. `mess.umpGroup` carries the UMP Group; `mess.messageType`
+/// distinguishes MT2 (7-bit-verbatim fields) from MT4 (MIDI-2-resolution
+/// fields, per AM_MIDI2.0Lib's umpCVM field layout in umpProcessor.h).
+/// Registered via setCVMHook(); if unset, inbound channel-voice content is
+/// silently dropped (the default before this bridge existed).
+typedef void (*UMPCVMFn)(struct umpCVM mess);
+
 /// UMP Function Block direction (M2-104 §7.1.8).
 enum UMP_FB_Direction : uint8_t
 {
     UMP_FB_INPUT_ONLY  = 0x01,
     UMP_FB_OUTPUT_ONLY = 0x02,
     UMP_FB_BIDIRECTIONAL = 0x03,
+};
+
+/// SysEx7 (MT 0x3) message-status framing, wire-encoded (M2-104 §7.7).
+/// Distinguishes a self-contained message from one split across multiple
+/// UMP words -- see sendSysex7Chunk().
+enum UMP_SysEx7Form : uint8_t
+{
+    UMP_SYSEX7_COMPLETE = 0x0,
+    UMP_SYSEX7_START    = 0x1,
+    UMP_SYSEX7_CONTINUE = 0x2,
+    UMP_SYSEX7_END      = 0x3,
 };
 
 /// One UMP Function Block declared by this endpoint. `name` is borrowed.
@@ -281,6 +301,9 @@ public:
     /// UMPProfileChangeFn), e.g. to enforce mutual exclusion between profiles.
     void setProfileChangeHook(UMPProfileChangeFn fn) { onProfileChange_ = fn; }
 
+    /// Register a hook for inbound Channel Voice messages (see UMPCVMFn).
+    void setCVMHook(UMPCVMFn fn) { cvmHook_ = fn; }
+
     /// Wire the transport and register the UMP Stream callbacks.
     void init(UMPEmitFn emit, uint16_t maxPacketSize);
 
@@ -329,6 +352,14 @@ public:
     /// UMP; the same packer MIDI-CI uses internally.
     void sendSysex7(uint8_t group, const uint8_t *body, uint16_t len);
 
+    /// Emit exactly one SysEx7 UMP word-pair (<=6 bytes) with an explicit
+    /// form. For callers streaming a message chunk-by-chunk as bytes
+    /// arrive (e.g. bridging a CIN-framed MIDI 1.0 transport packet-by-
+    /// packet) rather than holding the whole body in memory before calling
+    /// sendSysex7() -- the caller tracks message position itself and picks
+    /// Start/Continue/End/Complete accordingly. `n` > 6 is clamped to 6.
+    void sendSysex7Chunk(uint8_t group, UMP_SysEx7Form form, const uint8_t *body, uint8_t n);
+
     /// Push a Property Exchange subscription notification for `resourceName` to every
     /// current subscriber (a device-initiated "full" update carrying the resource's
     /// present value). Call this whenever the resource's backing data changes by ANY
@@ -341,6 +372,7 @@ private:
     void onEndpointDiscovery(uint8_t majVer, uint8_t minVer, uint8_t filter);
     void onFunctionBlock(uint8_t fbIdx, uint8_t filter);
     void onStreamConfigRequest(uint8_t protocol, bool jrrx, bool jrtx);
+    uint8_t fbIndexForGroup(uint8_t group) const;  ///< which declared FB owns `group` (0 if none)
 
     // ---- MIDI-CI (M5) — Capability Inquiry, generic + Profile-pluggable ------
     void     initCI();                                    ///< wire the CI processor + callbacks
@@ -405,6 +437,7 @@ private:
     // START/CONTINUE/END and hand the whole thing to appSink_ on completion.
     UMPAppSysexFn         appSink_         = nullptr;
     UMPProfileChangeFn    onProfileChange_ = nullptr;  ///< product hook for inbound profile on/off
+    UMPCVMFn              cvmHook_         = nullptr;  ///< product hook for inbound channel voice
     bool                  appSxInProgress_ = false;
     bool                  appSxOverflow_   = false;  ///< body exceeded APP_SX_BYTES; drop on end
     uint8_t               appSxGroup_      = 0;

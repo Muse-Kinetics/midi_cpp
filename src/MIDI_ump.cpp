@@ -66,7 +66,6 @@ namespace
     // single PE message. Payloads beyond this would need real PE chunking (future).
     constexpr uint32_t CI_MAX_SYSEX    = 1024;
     constexpr uint8_t  CI_OUTPUT_PATH  = 0;
-    constexpr uint8_t  CI_FB_INDEX     = 0;     // Function Block that owns Capability Inquiry
     // Capability Inquiry "Category Supported" bitmap (Discovery, M2-101 §Discovery).
     // Verified against the MIDI2.0Workbench decoder: 0x04 = Profile Configuration,
     // 0x08 = Property Exchange, 0x10 = Process Inquiry. Bits 0x01/0x02 are reserved
@@ -366,6 +365,7 @@ void UMP_Endpoint::init(UMPEmitFn emit, uint16_t maxPacketSize)
                           { onFunctionBlock(fbIdx, filter); });
     ump_.setStreamConfigRequest([this](uint8_t protocol, bool jrrx, bool jrtx)
                                 { onStreamConfigRequest(protocol, jrrx, jrtx); });
+    ump_.setCVM([this](umpCVM mess) { if (cvmHook_) cvmHook_(mess); });
     initCI();   // MIDI-CI (Capability Inquiry) on the Function Block
 }
 
@@ -613,6 +613,26 @@ void UMP_Endpoint::onFunctionBlock(uint8_t fbIdx, uint8_t filter)
     }
 }
 
+// Which declared Function Block owns `group` -- e.g. for a MIDI-CI Discovery
+// Reply's Function Block Index field, which must match the FB whose Group
+// the request actually arrived on (a host addressing FB N via Group N
+// expects the reply's FB Index to echo N; a hardcoded/wrong index is a
+// protocol violation the receiver NAKs -- "UMP Group Does not match FB
+// Index", confirmed live via the Workbench once fbCount_ grew past 1).
+// Falls back to 0 if no declared FB covers the group (shouldn't happen: all
+// FBs are declared statically before init()).
+uint8_t UMP_Endpoint::fbIndexForGroup(uint8_t group) const
+{
+    for (uint8_t i = 0; i < fbCount_; i++)
+    {
+        if (group >= fbs_[i].firstGroup && group < (uint8_t)(fbs_[i].firstGroup + fbs_[i].numGroups))
+        {
+            return i;
+        }
+    }
+    return 0;
+}
+
 void UMP_Endpoint::sendFunctionBlockInfo(uint8_t fbIdx)
 {
     const UMP_FunctionBlock &fb = fbs_[fbIdx];
@@ -811,6 +831,24 @@ void UMP_Endpoint::sendSysex7(uint8_t group, const uint8_t *body, uint16_t len)
     sendCISysex(group, body, len);
 }
 
+// Public: one already-framed SysEx7 word-pair, form chosen by the caller --
+// see the doc comment in MIDI_ump.hpp. Unlike sendSysex7()/sendCISysex(),
+// this does not decide Start/Continue/End itself (it has no visibility into
+// the rest of the message, which may not exist in memory anywhere at once).
+void UMP_Endpoint::sendSysex7Chunk(uint8_t group, UMP_SysEx7Form form, const uint8_t *body, uint8_t n)
+{
+    if (n > SX7_MAX_BYTES)
+    {
+        n = SX7_MAX_BYTES;
+    }
+    std::array<uint8_t, 6> sx = { 0, 0, 0, 0, 0, 0 };
+    for (uint8_t i = 0; i < n; i++)
+    {
+        sx[i] = body[i];
+    }
+    queueUMP(UMPMessage::mt3Sysex7(group, (uint8_t)form, n, sx), 2);
+}
+
 // Emit a MIDI 1.0 channel-voice message verbatim as UMP MT 0x2 (one 32-bit word:
 // [MT|group][status][d1][d2]). No scaling — the OS/host translates MT2 back to a
 // legacy MIDI 1.0 stream (MPE-compat).
@@ -873,7 +911,7 @@ void UMP_Endpoint::onCIDiscovery(const MIDICI &ci, uint16_t peerMaxSysex)
     uint16_t len = CIMessage::sendDiscoveryReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                  manuId, familyId, modelId, version,
                                                  categories, CI_MAX_SYSEX,
-                                                 CI_OUTPUT_PATH, CI_FB_INDEX);
+                                                 CI_OUTPUT_PATH, fbIndexForGroup(ci.umpGroup));
     sendCISysex(ci.umpGroup, sx, len);
     // Drain immediately: a host that broadcasts several CI requests back to back
     // (e.g. Profile Inquiry addressed to every channel + group + Function Block,
