@@ -33,6 +33,13 @@ public:
     int parse(uint8_t byte);
     void reset();
 
+    // True while waiting on the remaining data byte(s) of a channel message
+    // (status byte already received). Callers with an inter-byte timeout
+    // (e.g. a UART RX ISR) can use this to distinguish "genuinely stalled
+    // mid-message" from "idle between messages, possibly with running status
+    // still set" before deciding whether to reset() and record an error.
+    bool midMessage() const { return state == State::READ_DATA; }
+
     uint8_t msg[3]; // Public for reading when parse() returns true
     size_t msgLen = 0;
 

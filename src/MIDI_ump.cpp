@@ -366,6 +366,13 @@ void UMP_Endpoint::init(UMPEmitFn emit, uint16_t maxPacketSize)
                           { onFunctionBlock(fbIdx, filter); });
     ump_.setStreamConfigRequest([this](uint8_t protocol, bool jrrx, bool jrtx)
                                 { onStreamConfigRequest(protocol, jrrx, jrtx); });
+    ump_.setCVM([this](umpCVM mess)
+               {
+                   if (onChannelVoiceRx)
+                   {
+                       onChannelVoiceRx(mess.status, mess.channel, mess.note, (uint16_t)mess.value, mess.umpGroup);
+                   }
+               });
     initCI();   // MIDI-CI (Capability Inquiry) on the Function Block
 }
 
@@ -393,6 +400,23 @@ void UMP_Endpoint::poll()
     {
         uint32_t w = rxFifo_[rxTail_];
         rxTail_ = (uint16_t)((rxTail_ + 1) % RX_FIFO_WORDS);
+
+        // MT2 (MIDI 1.0 Channel Voice in UMP, M2-104 7.3): word layout is
+        // [type/group][status|channel][data1][data2], already plain 8-bit
+        // fields - no scaling. Deliver those raw bytes directly, alongside
+        // (not instead of) the normal processUMP() dispatch below, which
+        // still drives onChannelVoiceRx's scaled representation and every
+        // other UMP-level concern (Stream/CI/Profiles etc.) unchanged.
+        if (onRawMIDI1Rx && (w >> 28) == 0x2u)
+        {
+            uint8_t group   = (uint8_t)((w >> 24) & 0xFu);
+            uint8_t status  = (uint8_t)((w >> 16) & 0xF0u);
+            uint8_t channel = (uint8_t)((w >> 16) & 0x0Fu);
+            uint8_t data1   = (uint8_t)((w >> 8) & 0x7Fu);
+            uint8_t data2   = (uint8_t)(w & 0x7Fu);
+            onRawMIDI1Rx(status, channel, data1, data2, group);
+        }
+
         ump_.processUMP(w);
     }
     if (txLen_ > 0)

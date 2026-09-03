@@ -44,6 +44,7 @@
 #ifdef ENABLE_MIDI2
 
 #include <cstdint>
+#include <functional>
 #include <cstddef>
 #include <array>
 #include "umpProcessor.h"
@@ -238,6 +239,32 @@ public:
     /// They are added to ResourceList automatically and served on Get.
     void setPEResources(const UMP_PEResource *res, uint8_t count)
     { peRes_ = res; peResCount_ = count; }
+
+    /// Optional hook for incoming channel-voice messages (Note On/Off, CC,
+    /// etc. - see AM_MIDI2.0Lib's umpProcessor.h for the full status-byte
+    /// range this covers) arriving from the host on any Group. status is the
+    /// raw MIDI 1.0-style status byte with channel bits masked off (e.g.
+    /// 0x90 for Note On); velocity/value is already scaled up from the
+    /// wire's MT2/MT4 resolution. Policy (what to actually do about it)
+    /// belongs at the project level, not here - this class only provides
+    /// the mechanism. Set after init().
+    std::function<void(uint8_t status, uint8_t channel, uint8_t note, uint16_t velocity, uint8_t group)> onChannelVoiceRx = nullptr;
+
+    /// Optional hook for incoming MT2 (MIDI 1.0 Channel Voice in UMP, M2-104
+    /// section 7.3) words specifically, delivering data1/data2 exactly as
+    /// they sit on the wire - no scaling, unlike onChannelVoiceRx above.
+    /// M2-104 7.3's MT2 word is [type/group][status|channel][data1][data2],
+    /// already plain 8-bit (7-bit used) fields, the same byte values MIDI
+    /// 1.0 uses - there is nothing to scale, so a project that's about to
+    /// re-emit these bytes verbatim on a native MIDI 1.0 transport (e.g. a
+    /// 5-pin DIN Group declared MIDI 1.0 protocol on its Group Terminal
+    /// Block) should use this instead of onChannelVoiceRx, which widens
+    /// data2 to a common 16/32-bit representation for MT4 parity - useful
+    /// when the destination genuinely needs that width, wasted round-trip
+    /// (scale up here, scale back down there) when it doesn't. Fires for
+    /// every MT2 word regardless of Group; filter by group in the callback.
+    /// Set after init().
+    std::function<void(uint8_t status, uint8_t channel, uint8_t data1, uint8_t data2, uint8_t group)> onRawMIDI1Rx = nullptr;
 
     /// Register the MIDI-CI Profiles this device supports (array borrowed). The
     /// Profile Configuration category is advertised in Discovery when count > 0.
