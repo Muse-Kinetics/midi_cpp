@@ -638,10 +638,26 @@ void UMP_Endpoint::sendFunctionBlockInfo(uint8_t fbIdx)
     const UMP_FunctionBlock &fb = fbs_[fbIdx];
     bool recv   = (fb.direction & UMP_FB_INPUT_ONLY)  != 0;   // has IN Group Terminals
     bool sender = (fb.direction & UMP_FB_OUTPUT_ONLY) != 0;   // has OUT Group Terminals
-    queueUMP(UMPMessage::mtFFunctionBlockInfoNotify(fbIdx, /*active*/ true, fb.direction,
+    queueUMP(UMPMessage::mtFFunctionBlockInfoNotify(fbIdx, fbActive_[fbIdx], fb.direction,
                                                     sender, recv, fb.firstGroup, fb.numGroups,
                                                     FB_MIDICI_SUPPORT, FB_IS_MIDI1,
                                                     FB_MAX_SYSEX8_STREAMS), UMP_WORDS_MAX);
+}
+
+// Runtime active/inactive toggle — see header for the full rationale. Mirrors
+// setProfileEnabled()'s notify-and-broadcast shape.
+void UMP_Endpoint::setFunctionBlockActive(uint8_t fbIdx, bool active, bool notify)
+{
+    if (fbIdx >= fbCount_) return;   // unknown/undeclared block
+
+    fbActive_[fbIdx] = active;
+
+    if (!notify) return;
+
+    // Device-initiated (not a reply inside umpProcessor's inbound-handling
+    // flush), so flush explicitly here -- mirrors setProfileEnabled()'s tail.
+    sendFunctionBlockInfo(fbIdx);
+    flushTx();
 }
 
 void UMP_Endpoint::onStreamConfigRequest(uint8_t protocol, bool jrrx, bool jrtx)
@@ -857,6 +873,25 @@ void UMP_Endpoint::sendMIDI1ChannelVoiceMT2(uint8_t status, uint8_t d1, uint8_t 
     uint32_t w = ((uint32_t)0x2u << 28) | ((uint32_t)(group & 0x0F) << 24)
                | ((uint32_t)status << 16) | ((uint32_t)(d1 & 0x7F) << 8) | (uint32_t)(d2 & 0x7F);
     queueUMP(&w, 1);
+}
+
+// Re-emit an already-formed UMP message verbatim except for the Group
+// nibble (bits 27:24 of the first word), overwritten to `group`. See the
+// header doc comment -- content-agnostic relay, mirrors sendSysex7Chunk()'s
+// pass-through spirit for messages this endpoint doesn't itself interpret.
+void UMP_Endpoint::sendRawUmp(uint8_t group, const uint32_t *words, uint8_t nWords)
+{
+    if (nWords == 0 || nWords > 4)
+    {
+        return;
+    }
+    std::array<uint32_t, 4> w{};
+    for (uint8_t i = 0; i < nWords; i++)
+    {
+        w[i] = words[i];
+    }
+    w[0] = (w[0] & 0xF0FFFFFFu) | ((uint32_t)(group & 0x0F) << 24);
+    queueUMP(w.data(), nWords);
 }
 
 // Pack an already-built MIDI-CI SysEx body (0x7E ... last byte, no F0/F7) into

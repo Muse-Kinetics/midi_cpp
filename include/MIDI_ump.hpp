@@ -284,11 +284,26 @@ public:
     void setProfileEnabled(const uint8_t id[5], uint8_t numChannels, bool notify = true);
 
     /// Declare the endpoint's Function Blocks (array borrowed, not copied).
+    /// All blocks default to active=true (see setFunctionBlockActive()).
     void setFunctionBlocks(const UMP_FunctionBlock *blocks, uint8_t count)
-    { fbs_ = blocks; fbCount_ = count; }
+    {
+        fbs_ = blocks;
+        fbCount_ = (count > UMP_MAX_FUNCTION_BLOCKS) ? UMP_MAX_FUNCTION_BLOCKS : count;
+        for (uint8_t i = 0; i < fbCount_; i++) { fbActive_[i] = true; }
+    }
 
     /// Advertise Function Blocks as static (won't change after discovery).
     void setStaticFunctionBlocks(bool isStatic) { fbStatic_ = isStatic; }
+
+    /// Runtime active/inactive toggle for a declared Function Block — e.g. a
+    /// hub taking a hosted device's Function Block out of (or back into) its
+    /// own upstream MIDI-CI surface without re-enumerating USB (the GTB
+    /// topology is fixed; only this UMP/CI-layer state changes). Mirrors
+    /// setProfileEnabled()'s shape. When `notify`, broadcasts a Function
+    /// Block Info Notification with the new active state (mtFFunctionBlockInfoNotify);
+    /// pass notify=false to set initial state silently (e.g. at boot). No-op
+    /// if fbIdx is out of range.
+    void setFunctionBlockActive(uint8_t fbIdx, bool active, bool notify = true);
 
     /// Supply a hardware entropy source for the MIDI-CI MUID (see UMPRandFn).
     void setRandomSource(UMPRandFn fn) { randFn_ = fn; }
@@ -359,6 +374,16 @@ public:
     /// sendSysex7() -- the caller tracks message position itself and picks
     /// Start/Continue/End/Complete accordingly. `n` > 6 is clamped to 6.
     void sendSysex7Chunk(uint8_t group, UMP_SysEx7Form form, const uint8_t *body, uint8_t n);
+
+    /// Re-emit an already-formed UMP message (1-4 words, as received from
+    /// elsewhere) verbatim except for the Group nibble, which is overwritten
+    /// to `group`. For relaying content this endpoint doesn't itself
+    /// interpret -- e.g. a MIDI 2.0-native hosted device's own MT4 (full-
+    /// resolution Channel Voice) content, pass-through-mode routed by Group
+    /// remap only, same spirit as sendSysex7Chunk() above but content-
+    /// agnostic. `nWords` > 4 is clamped to 4 (UMP's largest message size);
+    /// 0 is a no-op.
+    void sendRawUmp(uint8_t group, const uint32_t *words, uint8_t nWords);
 
     /// Push a Property Exchange subscription notification for `resourceName` to every
     /// current subscriber (a device-initiated "full" update carrying the resource's
@@ -516,6 +541,13 @@ private:
     const UMP_FunctionBlock *fbs_     = nullptr;
     uint8_t                  fbCount_ = 0;
     bool                     fbStatic_ = true;
+    // Per-FB active state, engine-owned (mirrors profileChannels_'s pattern
+    // rather than a field on UMP_FunctionBlock itself, since fbs_ is a
+    // borrowed const array — see setFunctionBlockActive()). Defaults to
+    // active=true on declaration (setFunctionBlocks()), matching the
+    // previously-hardcoded always-active behavior.
+    static const uint8_t UMP_MAX_FUNCTION_BLOCKS = 16;
+    bool                      fbActive_[UMP_MAX_FUNCTION_BLOCKS] = { false };
 
     // Largest transport packet this engine will build on the stack (USB FS bulk).
     static const uint16_t UMP_MAX_PACKET = 64;
