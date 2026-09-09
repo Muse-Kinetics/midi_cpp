@@ -814,7 +814,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					// non-streaming buffer path, the preamble-CRC-fail path, and the
 					// bootloader flush path (no 7th byte decoded in those cases).
 					if (rx_state == CORE_SX_PACKET_DATA_STREAM &&
-					    size > preamble_index + (uint16_t)sizeof(PACKET_PREAMBLE))
+					    size > (size_t)preamble_index + sizeof(PACKET_PREAMBLE))
 					{
 						const uint8_t spillByte = buffer[--size];
 						if (stream_bytes_remaining > 0)
