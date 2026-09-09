@@ -804,6 +804,35 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 							rx_set_ignore();
 						}
 					}
+
+					// TX does not flush between preamble and payload (SYX_FLUSH_NO), and
+					// the preamble is exactly 6 decoded bytes — leaving one slot in the
+					// 7-byte group.  That slot is filled by the first payload byte, which
+					// decode_get() yields inside the loop above and single() deposits into
+					// buffer[].  Reclaim it and route it through the streaming path so the
+					// byte count and CRC stay aligned.  The guard is a no-op for the
+					// non-streaming buffer path, the preamble-CRC-fail path, and the
+					// bootloader flush path (no 7th byte decoded in those cases).
+					if (rx_state == CORE_SX_PACKET_DATA_STREAM &&
+					    size > preamble_index + (uint16_t)sizeof(PACKET_PREAMBLE))
+					{
+						const uint8_t spillByte = buffer[--size];
+						if (stream_bytes_remaining > 0)
+						{
+							crc_byte(&stream_crc, spillByte);
+							if (cb_rx_PacketDataStreamProcess)
+								cb_rx_PacketDataStreamProcess(context_rx, preamble->category, preamble->type,
+								                              stream_payload_index, spillByte);
+							stream_payload_index++;
+							stream_bytes_remaining--;
+						}
+						else if (stream_tail_idx < 4)
+						{
+							if (stream_tail_idx < 2)
+								crc_byte(&stream_crc, spillByte);
+							stream_tail.raw[stream_tail_idx++] = spillByte;
+						}
+					}
 					break; // end CORE_SX_PACKET_PREAMBLE
 				}
 				case CORE_SX_PACKET_DATA:
