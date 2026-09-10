@@ -1352,7 +1352,7 @@ void UMP_Endpoint::sendPEReply(const MIDICI &ci, uint16_t status, const uint8_t 
         // accumulate whole before poll() next flushes -- keeps txBuf_'s peak
         // usage to ~1 chunk instead of the entire reply, and avoids silently
         // truncating a reply whose total UMP encoding exceeds TX_BUF_BYTES
-        // (queueUMP() drops on overflow; see mimic_hub decisions.md 2026-08-19).
+        // (queueUMP() drops on overflow).
         flushTx();
         off += thisLen;
     }

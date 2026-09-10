@@ -514,6 +514,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					}
 					break; // end CORE_SX_PACKET_DATA
 				}
+#ifdef MIDI_CPP_ENABLE_SYSEX_STREAM_RX
 				case CORE_SX_PACKET_DATA_STREAM:
 				{
 					// TAIL union: fmt.length = next-packet length (>0 means another packet follows),
@@ -544,6 +545,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 
 					break; // end CORE_SX_PACKET_DATA_STREAM
 				}
+#endif /* MIDI_CPP_ENABLE_SYSEX_STREAM_RX */
 				case CORE_SX_RAW_DATA: // raw = unencoded
 				{
 					PACKET_PREAMBLE rawPreamble; // don't point to our buffer because our incoming message doesn't contain size or crc elements
@@ -745,6 +747,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 								// If the payload is larger than SYX_RX_BLOCK_SIZE and the app doesn't
 								// claim it, we must reject — there is no room to buffer it.
 								bool streamClaimed = false;
+#ifdef MIDI_CPP_ENABLE_SYSEX_STREAM_RX
 								if (cb_rx_PacketDataStreamOpen)
 								{
 									streamClaimed = cb_rx_PacketDataStreamOpen(context_rx,
@@ -752,15 +755,18 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 									                                            preamble->type,
 									                                            payloadDataLen);
 								}
+#endif /* MIDI_CPP_ENABLE_SYSEX_STREAM_RX */
 
 								if (streamClaimed)
 								{
+#ifdef MIDI_CPP_ENABLE_SYSEX_STREAM_RX
 									rx_state               = CORE_SX_PACKET_DATA_STREAM;
 									stream_bytes_remaining = payloadDataLen;
 									stream_payload_index   = 0;
 									stream_crc             = 0xFFFF;
 									stream_tail            = {};
 									stream_tail_idx        = 0;
+#endif /* MIDI_CPP_ENABLE_SYSEX_STREAM_RX */
 								}
 								else if (payloadDataLen + 4 > SYX_RX_BLOCK_SIZE)
 								{
@@ -813,6 +819,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					// byte count and CRC stay aligned.  The guard is a no-op for the
 					// non-streaming buffer path, the preamble-CRC-fail path, and the
 					// bootloader flush path (no 7th byte decoded in those cases).
+#ifdef MIDI_CPP_ENABLE_SYSEX_STREAM_RX
 					if (rx_state == CORE_SX_PACKET_DATA_STREAM &&
 					    size > (size_t)preamble_index + sizeof(PACKET_PREAMBLE))
 					{
@@ -833,6 +840,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 							stream_tail.raw[stream_tail_idx++] = spillByte;
 						}
 					}
+#endif /* MIDI_CPP_ENABLE_SYSEX_STREAM_RX */
 					break; // end CORE_SX_PACKET_PREAMBLE
 				}
 				case CORE_SX_PACKET_DATA:
@@ -846,6 +854,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					}
 					break; // end CORE_SX_PACKET_DATA
 				}
+#ifdef MIDI_CPP_ENABLE_SYSEX_STREAM_RX
 				case CORE_SX_PACKET_DATA_STREAM:
 				{
 					// Streaming path: decoded bytes are routed directly to the application via
@@ -879,6 +888,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					}
 					break; // end CORE_SX_PACKET_DATA_STREAM
 				}
+#endif /* MIDI_CPP_ENABLE_SYSEX_STREAM_RX */
 				case CORE_SX_RAW_DATA: // unencoded 7bit data
 				{
 					single(sx_char); // process unencoded data when we get to end of sysex

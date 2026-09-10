@@ -507,10 +507,9 @@ private:
     uint8_t               curProfileGroup_      = 0;
     uint8_t               curProfileDeviceId_   = 0x7F;  ///< Device ID (address) of the in-flight profile transaction
 
-    // Property Exchange scratch, consolidated into two shared arenas (mimic_hub
-    // 2026-08-19: see .buddy-project/decisions.md "B2 -- shared-arena
-    // consolidation" for the full reasoning). Safe because this whole engine is
-    // single-threaded/non-reentrant (task context only -- rxFifo_ is the sole
+    // Property Exchange scratch, consolidated into two shared arenas. Safe
+    // because this whole engine is single-threaded/non-reentrant (task
+    // context only -- rxFifo_ is the sole
     // IRQ-touched buffer and stays standalone below) and, within any one PE
     // transaction, each arena's two roles never execute concurrently:
     //
