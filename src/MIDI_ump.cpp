@@ -66,7 +66,6 @@ namespace
     // single PE message. Payloads beyond this would need real PE chunking (future).
     constexpr uint32_t CI_MAX_SYSEX    = 1024;
     constexpr uint8_t  CI_OUTPUT_PATH  = 0;
-    constexpr uint8_t  CI_FB_INDEX     = 0;     // Function Block that owns Capability Inquiry
     // Capability Inquiry "Category Supported" bitmap (Discovery, M2-101 §Discovery).
     // Verified against the MIDI2.0Workbench decoder: 0x04 = Profile Configuration,
     // 0x08 = Property Exchange, 0x10 = Process Inquiry. Bits 0x01/0x02 are reserved
@@ -366,13 +365,7 @@ void UMP_Endpoint::init(UMPEmitFn emit, uint16_t maxPacketSize)
                           { onFunctionBlock(fbIdx, filter); });
     ump_.setStreamConfigRequest([this](uint8_t protocol, bool jrrx, bool jrtx)
                                 { onStreamConfigRequest(protocol, jrrx, jrtx); });
-    ump_.setCVM([this](umpCVM mess)
-               {
-                   if (onChannelVoiceRx)
-                   {
-                       onChannelVoiceRx(mess.status, mess.channel, mess.note, (uint16_t)mess.value, mess.umpGroup);
-                   }
-               });
+    ump_.setCVM([this](umpCVM mess) { if (cvmHook_) cvmHook_(mess); });
     initCI();   // MIDI-CI (Capability Inquiry) on the Function Block
 }
 
@@ -405,7 +398,7 @@ void UMP_Endpoint::poll()
         // [type/group][status|channel][data1][data2], already plain 8-bit
         // fields - no scaling. Deliver those raw bytes directly, alongside
         // (not instead of) the normal processUMP() dispatch below, which
-        // still drives onChannelVoiceRx's scaled representation and every
+        // still drives setCVMHook()'s scaled umpCVM representation and every
         // other UMP-level concern (Stream/CI/Profiles etc.) unchanged.
         if (onRawMIDI1Rx && (w >> 28) == 0x2u)
         {
@@ -637,15 +630,51 @@ void UMP_Endpoint::onFunctionBlock(uint8_t fbIdx, uint8_t filter)
     }
 }
 
+// Which declared Function Block owns `group` -- e.g. for a MIDI-CI Discovery
+// Reply's Function Block Index field, which must match the FB whose Group
+// the request actually arrived on (a host addressing FB N via Group N
+// expects the reply's FB Index to echo N; a hardcoded/wrong index is a
+// protocol violation the receiver NAKs -- "UMP Group Does not match FB
+// Index", confirmed live via the Workbench once fbCount_ grew past 1).
+// Falls back to 0 if no declared FB covers the group (shouldn't happen: all
+// FBs are declared statically before init()).
+uint8_t UMP_Endpoint::fbIndexForGroup(uint8_t group) const
+{
+    for (uint8_t i = 0; i < fbCount_; i++)
+    {
+        if (group >= fbs_[i].firstGroup && group < (uint8_t)(fbs_[i].firstGroup + fbs_[i].numGroups))
+        {
+            return i;
+        }
+    }
+    return 0;
+}
+
 void UMP_Endpoint::sendFunctionBlockInfo(uint8_t fbIdx)
 {
     const UMP_FunctionBlock &fb = fbs_[fbIdx];
     bool recv   = (fb.direction & UMP_FB_INPUT_ONLY)  != 0;   // has IN Group Terminals
     bool sender = (fb.direction & UMP_FB_OUTPUT_ONLY) != 0;   // has OUT Group Terminals
-    queueUMP(UMPMessage::mtFFunctionBlockInfoNotify(fbIdx, /*active*/ true, fb.direction,
+    queueUMP(UMPMessage::mtFFunctionBlockInfoNotify(fbIdx, fbActive_[fbIdx], fb.direction,
                                                     sender, recv, fb.firstGroup, fb.numGroups,
                                                     FB_MIDICI_SUPPORT, FB_IS_MIDI1,
                                                     FB_MAX_SYSEX8_STREAMS), UMP_WORDS_MAX);
+}
+
+// Runtime active/inactive toggle — see header for the full rationale. Mirrors
+// setProfileEnabled()'s notify-and-broadcast shape.
+void UMP_Endpoint::setFunctionBlockActive(uint8_t fbIdx, bool active, bool notify)
+{
+    if (fbIdx >= fbCount_) return;   // unknown/undeclared block
+
+    fbActive_[fbIdx] = active;
+
+    if (!notify) return;
+
+    // Device-initiated (not a reply inside umpProcessor's inbound-handling
+    // flush), so flush explicitly here -- mirrors setProfileEnabled()'s tail.
+    sendFunctionBlockInfo(fbIdx);
+    flushTx();
 }
 
 void UMP_Endpoint::onStreamConfigRequest(uint8_t protocol, bool jrrx, bool jrtx)
@@ -835,6 +864,24 @@ void UMP_Endpoint::sendSysex7(uint8_t group, const uint8_t *body, uint16_t len)
     sendCISysex(group, body, len);
 }
 
+// Public: one already-framed SysEx7 word-pair, form chosen by the caller --
+// see the doc comment in MIDI_ump.hpp. Unlike sendSysex7()/sendCISysex(),
+// this does not decide Start/Continue/End itself (it has no visibility into
+// the rest of the message, which may not exist in memory anywhere at once).
+void UMP_Endpoint::sendSysex7Chunk(uint8_t group, UMP_SysEx7Form form, const uint8_t *body, uint8_t n)
+{
+    if (n > SX7_MAX_BYTES)
+    {
+        n = SX7_MAX_BYTES;
+    }
+    std::array<uint8_t, 6> sx = { 0, 0, 0, 0, 0, 0 };
+    for (uint8_t i = 0; i < n; i++)
+    {
+        sx[i] = body[i];
+    }
+    queueUMP(UMPMessage::mt3Sysex7(group, (uint8_t)form, n, sx), 2);
+}
+
 // Emit a MIDI 1.0 channel-voice message verbatim as UMP MT 0x2 (one 32-bit word:
 // [MT|group][status][d1][d2]). No scaling — the OS/host translates MT2 back to a
 // legacy MIDI 1.0 stream (MPE-compat).
@@ -843,6 +890,25 @@ void UMP_Endpoint::sendMIDI1ChannelVoiceMT2(uint8_t status, uint8_t d1, uint8_t 
     uint32_t w = ((uint32_t)0x2u << 28) | ((uint32_t)(group & 0x0F) << 24)
                | ((uint32_t)status << 16) | ((uint32_t)(d1 & 0x7F) << 8) | (uint32_t)(d2 & 0x7F);
     queueUMP(&w, 1);
+}
+
+// Re-emit an already-formed UMP message verbatim except for the Group
+// nibble (bits 27:24 of the first word), overwritten to `group`. See the
+// header doc comment -- content-agnostic relay, mirrors sendSysex7Chunk()'s
+// pass-through spirit for messages this endpoint doesn't itself interpret.
+void UMP_Endpoint::sendRawUmp(uint8_t group, const uint32_t *words, uint8_t nWords)
+{
+    if (nWords == 0 || nWords > 4)
+    {
+        return;
+    }
+    std::array<uint32_t, 4> w{};
+    for (uint8_t i = 0; i < nWords; i++)
+    {
+        w[i] = words[i];
+    }
+    w[0] = (w[0] & 0xF0FFFFFFu) | ((uint32_t)(group & 0x0F) << 24);
+    queueUMP(w.data(), nWords);
 }
 
 // Pack an already-built MIDI-CI SysEx body (0x7E ... last byte, no F0/F7) into
@@ -897,8 +963,16 @@ void UMP_Endpoint::onCIDiscovery(const MIDICI &ci, uint16_t peerMaxSysex)
     uint16_t len = CIMessage::sendDiscoveryReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                  manuId, familyId, modelId, version,
                                                  categories, CI_MAX_SYSEX,
-                                                 CI_OUTPUT_PATH, CI_FB_INDEX);
+                                                 CI_OUTPUT_PATH, fbIndexForGroup(ci.umpGroup));
     sendCISysex(ci.umpGroup, sx, len);
+    // Drain immediately: a host that broadcasts several CI requests back to back
+    // (e.g. Profile Inquiry addressed to every channel + group + Function Block,
+    // 18 messages in one batch) delivers them all before the next poll() -- without
+    // an per-reply flush here, all of poll()'s single accumulated flushTx() call
+    // can silently overflow/drop the later replies in the batch (same class of bug
+    // as the PE txBuf_ fix, decisions.md 2026-08-19; found live via Workbench for
+    // Profile Inquiry specifically, 2026-08-20 -- see decisions.md that date).
+    flushTx();
 }
 
 // ---- MIDI-CI Profile Configuration (generic Common-Rules envelope) ---------
@@ -932,6 +1006,7 @@ void UMP_Endpoint::onCIProfileInquiry(const MIDICI &ci)
     uint16_t len = CIMessage::sendProfileListResponse(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                       ci.deviceId, ne, enabled, nd, disabled);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();   // see onCIDiscovery's comment: batched CI requests need a per-reply drain
 }
 
 // Set Profile On -> enable via the product callback, then notify Enabled/Disabled.
@@ -953,6 +1028,7 @@ void UMP_Endpoint::onCIProfileOn(const MIDICI &ci, const uint8_t id[5], uint8_t 
         ? CIMessage::sendProfileEnabled(sx, ci.ciVer, localMUID_, ci.remoteMUID, ci.deviceId, idArray(id), ch)
         : CIMessage::sendProfileDisabled(sx, ci.ciVer, localMUID_, ci.remoteMUID, ci.deviceId, idArray(id), 0);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();
 
     // Let the product coordinate (e.g. disable a mutually-exclusive profile). The
     // hook may call setProfileEnabled() safely — that path does not re-enter here.
@@ -976,6 +1052,7 @@ void UMP_Endpoint::onCIProfileOff(const MIDICI &ci, const uint8_t id[5])
     uint16_t len = CIMessage::sendProfileDisabled(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                   ci.deviceId, idArray(id), 0);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();
 
     if (onProfileChange_ != nullptr) onProfileChange_(id, false);
 }
@@ -1013,6 +1090,7 @@ void UMP_Endpoint::setProfileEnabled(const uint8_t id[5], uint8_t numChannels, b
         : CIMessage::sendProfileDisabled(sx, FB_MIDICI_SUPPORT, localMUID_, M2_CI_BROADCAST,
                                          deviceId, idArray(id), 0);
     sendCISysex(/*group*/ 0, sx, len);   // single Function Block on UMP group 0
+    flushTx();
 }
 
 // Profile Details Inquiry -> Reply. The reply payload is profile-specific and
@@ -1034,6 +1112,7 @@ void UMP_Endpoint::onCIProfileDetailsInquiry(const MIDICI &ci, const uint8_t id[
     uint16_t len = CIMessage::sendProfileDetailsReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                       ci.deviceId, idArray(id), target, (uint16_t)dl, data);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();
 }
 
 // Profile Specific Data -> hand the opaque payload to the product callback, which
@@ -1068,6 +1147,7 @@ void UMP_Endpoint::replyProfileData(const uint8_t *data, uint16_t len)
                                                     curProfileRemoteMUID_, curProfileDeviceId_,
                                                     idArray(curProfileId_), len, (uint8_t *)data);
     sendCISysex(curProfileGroup_, peSysex_, n);
+    flushTx();
 }
 
 // Send a device-initiated Profile Specific Data message for `id` to the host that
@@ -1083,6 +1163,7 @@ bool UMP_Endpoint::sendProfileSpecificData(const uint8_t id[5], const uint8_t *d
     uint16_t n = CIMessage::sendProfileSpecificData(peSysex_, FB_MIDICI_SUPPORT, localMUID_, dest,
                                                     profiles_[idx].address, idArray(id), len, (uint8_t *)data);
     sendCISysex(/*group*/ 0, peSysex_, n);
+    flushTx();
     return true;
 }
 
@@ -1094,6 +1175,7 @@ void UMP_Endpoint::onCIPECapabilities(const MIDICI &ci)
     uint16_t len = CIMessage::sendPECapabilityReply(sx, ci.ciVer, localMUID_, ci.remoteMUID,
                                                     PE_SIMUL_REQUESTS, PE_MAJ_VER, PE_MIN_VER);
     sendCISysex(ci.umpGroup, sx, len);
+    flushTx();
 }
 
 // ---- Property Exchange Get (M5 step 5) -------------------------------------
@@ -1288,6 +1370,7 @@ void UMP_Endpoint::sendPESetReplyStatus(const MIDICI &ci, uint16_t status)
     uint16_t n = CIMessage::sendPESetReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
                                            ci.requestId, (uint16_t)hlen, (uint8_t *)hdr);
     sendCISysex(ci.umpGroup, peSysex_, n);
+    flushTx();
 }
 
 // PE Subscription Reply: status-only header, no subscribeId (used for rejects and
@@ -1303,6 +1386,7 @@ void UMP_Endpoint::sendPESubReplyStatus(const MIDICI &ci, uint16_t status)
     uint16_t n = CIMessage::sendPESubReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
                                            ci.requestId, (uint16_t)hlen, (uint8_t *)hdr);
     sendCISysex(ci.umpGroup, peSysex_, n);
+    flushTx();
 }
 
 // PE Subscription: a host subscribes to a resource with command "start" (we assign
@@ -1356,6 +1440,7 @@ void UMP_Endpoint::onCIPESubInquiry(const MIDICI &ci, const char *header, uint16
         uint16_t n = CIMessage::sendPESubReply(peSysex_, ci.ciVer, localMUID_, ci.remoteMUID,
                                                ci.requestId, (uint16_t)hl, (uint8_t *)hdr);
         sendCISysex(ci.umpGroup, peSysex_, n);
+        flushTx();
     }
     else if (strcmp(cmd, "end") == 0)
     {

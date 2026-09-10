@@ -111,12 +111,32 @@ typedef void (*UMPAppSysexFn)(uint8_t group, const uint8_t *body, uint16_t len);
 /// disable a conflicting profile without recursing.
 typedef void (*UMPProfileChangeFn)(const uint8_t id[5], bool enabled);
 
+/// Hook invoked for every inbound Channel Voice message (MIDI 1.0-in-UMP
+/// MT 0x2, or native MIDI 2.0 MT 0x4) that reaches this endpoint's UMP
+/// processor. `mess.umpGroup` carries the UMP Group; `mess.messageType`
+/// distinguishes MT2 (7-bit-verbatim fields) from MT4 (MIDI-2-resolution
+/// fields, per AM_MIDI2.0Lib's umpCVM field layout in umpProcessor.h).
+/// Registered via setCVMHook(); if unset, inbound channel-voice content is
+/// silently dropped (the default before this bridge existed).
+typedef void (*UMPCVMFn)(struct umpCVM mess);
+
 /// UMP Function Block direction (M2-104 §7.1.8).
 enum UMP_FB_Direction : uint8_t
 {
     UMP_FB_INPUT_ONLY  = 0x01,
     UMP_FB_OUTPUT_ONLY = 0x02,
     UMP_FB_BIDIRECTIONAL = 0x03,
+};
+
+/// SysEx7 (MT 0x3) message-status framing, wire-encoded (M2-104 §7.7).
+/// Distinguishes a self-contained message from one split across multiple
+/// UMP words -- see sendSysex7Chunk().
+enum UMP_SysEx7Form : uint8_t
+{
+    UMP_SYSEX7_COMPLETE = 0x0,
+    UMP_SYSEX7_START    = 0x1,
+    UMP_SYSEX7_CONTINUE = 0x2,
+    UMP_SYSEX7_END      = 0x3,
 };
 
 /// One UMP Function Block declared by this endpoint. `name` is borrowed.
@@ -240,30 +260,21 @@ public:
     void setPEResources(const UMP_PEResource *res, uint8_t count)
     { peRes_ = res; peResCount_ = count; }
 
-    /// Optional hook for incoming channel-voice messages (Note On/Off, CC,
-    /// etc. - see AM_MIDI2.0Lib's umpProcessor.h for the full status-byte
-    /// range this covers) arriving from the host on any Group. status is the
-    /// raw MIDI 1.0-style status byte with channel bits masked off (e.g.
-    /// 0x90 for Note On); velocity/value is already scaled up from the
-    /// wire's MT2/MT4 resolution. Policy (what to actually do about it)
-    /// belongs at the project level, not here - this class only provides
-    /// the mechanism. Set after init().
-    std::function<void(uint8_t status, uint8_t channel, uint8_t note, uint16_t velocity, uint8_t group)> onChannelVoiceRx = nullptr;
-
     /// Optional hook for incoming MT2 (MIDI 1.0 Channel Voice in UMP, M2-104
     /// section 7.3) words specifically, delivering data1/data2 exactly as
-    /// they sit on the wire - no scaling, unlike onChannelVoiceRx above.
-    /// M2-104 7.3's MT2 word is [type/group][status|channel][data1][data2],
-    /// already plain 8-bit (7-bit used) fields, the same byte values MIDI
-    /// 1.0 uses - there is nothing to scale, so a project that's about to
-    /// re-emit these bytes verbatim on a native MIDI 1.0 transport (e.g. a
-    /// 5-pin DIN Group declared MIDI 1.0 protocol on its Group Terminal
-    /// Block) should use this instead of onChannelVoiceRx, which widens
-    /// data2 to a common 16/32-bit representation for MT4 parity - useful
-    /// when the destination genuinely needs that width, wasted round-trip
-    /// (scale up here, scale back down there) when it doesn't. Fires for
-    /// every MT2 word regardless of Group; filter by group in the callback.
-    /// Set after init().
+    /// they sit on the wire - no scaling. M2-104 7.3's MT2 word is
+    /// [type/group][status|channel][data1][data2], already plain 8-bit
+    /// (7-bit used) fields, the same byte values MIDI 1.0 uses - there is
+    /// nothing to scale, so a project that's about to re-emit these bytes
+    /// verbatim on a native MIDI 1.0 transport (e.g. a 5-pin DIN Group
+    /// declared MIDI 1.0 protocol on its Group Terminal Block) should use
+    /// this instead of setCVMHook()'s UMPCVMFn, which delivers the
+    /// already-MT2/MT4-scaled umpCVM struct - useful when the destination
+    /// genuinely needs MIDI-2 resolution or MT4 support, wasted round-trip
+    /// (scale up, then back down) when it doesn't. Fires for every MT2 word
+    /// regardless of Group; filter by group in the callback. Set after
+    /// init(). Fires alongside (not instead of) setCVMHook()'s callback -
+    /// independent mechanisms, a project may use either, both, or neither.
     std::function<void(uint8_t status, uint8_t channel, uint8_t data1, uint8_t data2, uint8_t group)> onRawMIDI1Rx = nullptr;
 
     /// Register the MIDI-CI Profiles this device supports (array borrowed). The
@@ -291,11 +302,26 @@ public:
     void setProfileEnabled(const uint8_t id[5], uint8_t numChannels, bool notify = true);
 
     /// Declare the endpoint's Function Blocks (array borrowed, not copied).
+    /// All blocks default to active=true (see setFunctionBlockActive()).
     void setFunctionBlocks(const UMP_FunctionBlock *blocks, uint8_t count)
-    { fbs_ = blocks; fbCount_ = count; }
+    {
+        fbs_ = blocks;
+        fbCount_ = (count > UMP_MAX_FUNCTION_BLOCKS) ? UMP_MAX_FUNCTION_BLOCKS : count;
+        for (uint8_t i = 0; i < fbCount_; i++) { fbActive_[i] = true; }
+    }
 
     /// Advertise Function Blocks as static (won't change after discovery).
     void setStaticFunctionBlocks(bool isStatic) { fbStatic_ = isStatic; }
+
+    /// Runtime active/inactive toggle for a declared Function Block — e.g. a
+    /// hub taking a hosted device's Function Block out of (or back into) its
+    /// own upstream MIDI-CI surface without re-enumerating USB (the GTB
+    /// topology is fixed; only this UMP/CI-layer state changes). Mirrors
+    /// setProfileEnabled()'s shape. When `notify`, broadcasts a Function
+    /// Block Info Notification with the new active state (mtFFunctionBlockInfoNotify);
+    /// pass notify=false to set initial state silently (e.g. at boot). No-op
+    /// if fbIdx is out of range.
+    void setFunctionBlockActive(uint8_t fbIdx, bool active, bool notify = true);
 
     /// Supply a hardware entropy source for the MIDI-CI MUID (see UMPRandFn).
     void setRandomSource(UMPRandFn fn) { randFn_ = fn; }
@@ -307,6 +333,9 @@ public:
     /// Register a hook called after an inbound Set Profile On/Off (see
     /// UMPProfileChangeFn), e.g. to enforce mutual exclusion between profiles.
     void setProfileChangeHook(UMPProfileChangeFn fn) { onProfileChange_ = fn; }
+
+    /// Register a hook for inbound Channel Voice messages (see UMPCVMFn).
+    void setCVMHook(UMPCVMFn fn) { cvmHook_ = fn; }
 
     /// Wire the transport and register the UMP Stream callbacks.
     void init(UMPEmitFn emit, uint16_t maxPacketSize);
@@ -356,6 +385,24 @@ public:
     /// UMP; the same packer MIDI-CI uses internally.
     void sendSysex7(uint8_t group, const uint8_t *body, uint16_t len);
 
+    /// Emit exactly one SysEx7 UMP word-pair (<=6 bytes) with an explicit
+    /// form. For callers streaming a message chunk-by-chunk as bytes
+    /// arrive (e.g. bridging a CIN-framed MIDI 1.0 transport packet-by-
+    /// packet) rather than holding the whole body in memory before calling
+    /// sendSysex7() -- the caller tracks message position itself and picks
+    /// Start/Continue/End/Complete accordingly. `n` > 6 is clamped to 6.
+    void sendSysex7Chunk(uint8_t group, UMP_SysEx7Form form, const uint8_t *body, uint8_t n);
+
+    /// Re-emit an already-formed UMP message (1-4 words, as received from
+    /// elsewhere) verbatim except for the Group nibble, which is overwritten
+    /// to `group`. For relaying content this endpoint doesn't itself
+    /// interpret -- e.g. a MIDI 2.0-native hosted device's own MT4 (full-
+    /// resolution Channel Voice) content, pass-through-mode routed by Group
+    /// remap only, same spirit as sendSysex7Chunk() above but content-
+    /// agnostic. `nWords` > 4 is clamped to 4 (UMP's largest message size);
+    /// 0 is a no-op.
+    void sendRawUmp(uint8_t group, const uint32_t *words, uint8_t nWords);
+
     /// Push a Property Exchange subscription notification for `resourceName` to every
     /// current subscriber (a device-initiated "full" update carrying the resource's
     /// present value). Call this whenever the resource's backing data changes by ANY
@@ -368,6 +415,7 @@ private:
     void onEndpointDiscovery(uint8_t majVer, uint8_t minVer, uint8_t filter);
     void onFunctionBlock(uint8_t fbIdx, uint8_t filter);
     void onStreamConfigRequest(uint8_t protocol, bool jrrx, bool jrtx);
+    uint8_t fbIndexForGroup(uint8_t group) const;  ///< which declared FB owns `group` (0 if none)
 
     // ---- MIDI-CI (M5) — Capability Inquiry, generic + Profile-pluggable ------
     void     initCI();                                    ///< wire the CI processor + callbacks
@@ -432,6 +480,7 @@ private:
     // START/CONTINUE/END and hand the whole thing to appSink_ on completion.
     UMPAppSysexFn         appSink_         = nullptr;
     UMPProfileChangeFn    onProfileChange_ = nullptr;  ///< product hook for inbound profile on/off
+    UMPCVMFn              cvmHook_         = nullptr;  ///< product hook for inbound channel voice
     bool                  appSxInProgress_ = false;
     bool                  appSxOverflow_   = false;  ///< body exceeded APP_SX_BYTES; drop on end
     uint8_t               appSxGroup_      = 0;
@@ -510,6 +559,13 @@ private:
     const UMP_FunctionBlock *fbs_     = nullptr;
     uint8_t                  fbCount_ = 0;
     bool                     fbStatic_ = true;
+    // Per-FB active state, engine-owned (mirrors profileChannels_'s pattern
+    // rather than a field on UMP_FunctionBlock itself, since fbs_ is a
+    // borrowed const array — see setFunctionBlockActive()). Defaults to
+    // active=true on declaration (setFunctionBlocks()), matching the
+    // previously-hardcoded always-active behavior.
+    static const uint8_t UMP_MAX_FUNCTION_BLOCKS = 16;
+    bool                      fbActive_[UMP_MAX_FUNCTION_BLOCKS] = { false };
 
     // Largest transport packet this engine will build on the stack (USB FS bulk).
     static const uint16_t UMP_MAX_PACKET = 64;
