@@ -71,4 +71,56 @@ inline uint16_t crc_buf(uint16_t *this_crc, const uint8_t *ptr, uint16_t length)
     return *this_crc;
 }
 
+//*****************************************************************************
+//* Legacy signed-char CRC variant
+//*****************************************************************************
+//
+// The pre-bootloader, v93-era 8051 KMI firmware (e.g. the original SoftStep /
+// 12 Step "bootloader trojan horse" images) computed this same CRC with a
+// *signed* char, so every byte with the high bit set (>= 0x80) was
+// sign-extended before the XOR - effectively mixing an extra 0xFF00 into the
+// accumulator relative to the unsigned crc_byte() above. This is precisely the
+// architecture hazard the WARNING on crc_byte() calls out.
+//
+// The result: crc_byte() (unsigned) verifies every modern KMI product, but
+// does NOT reproduce a legacy image's checksums on any payload containing a
+// high-bit byte (small/low-value payloads happen to match under both). Host
+// tools that need to decode/verify - or re-encode - firmware captured from, or
+// destined for, those legacy products must use this signed variant to match
+// what the device's own crc_byte() produced. On-device firmware should keep
+// using the plain (architecture-native) crc_byte().
+//
+inline void crc_byte_signed(uint16_t *this_crc, uint8_t val)
+{
+    uint16_t crc_val = *this_crc;
+    // reproduce the legacy signed-char sign extension of the input byte
+    uint16_t sval = (uint16_t)(int16_t)(int8_t)val;
+
+    uint16_t temp = ((crc_val >> 8) ^ sval) & 0xFFFF;
+    crc_val = (crc_val << 8) & 0xFFFF;
+    uint16_t quick = (temp ^ (temp >> 4)) & 0xFFFF;
+    crc_val = (crc_val ^ quick) & 0xFFFF;
+    quick = (quick << 5) & 0xFFFF;
+    crc_val = (crc_val ^ quick) & 0xFFFF;
+    quick = (quick << 7) & 0xFFFF;
+    crc_val = (crc_val ^ quick) & 0xFFFF;
+
+    *this_crc = crc_val;
+}
+
+inline void crc_append_buf_signed(uint16_t *this_crc, const uint8_t *ptr, uint16_t length)
+{
+    while (length--)
+    {
+        crc_byte_signed(this_crc, *ptr++);
+    }
+}
+
+inline uint16_t crc_buf_signed(uint16_t *this_crc, const uint8_t *ptr, uint16_t length)
+{
+    crc_init(this_crc);
+    crc_append_buf_signed(this_crc, ptr, length);
+    return *this_crc;
+}
+
 #endif /* UTILS_CRC_H */

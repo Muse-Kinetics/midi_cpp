@@ -241,16 +241,28 @@ int16_t SysExMessageTX::sendSyxUnEncodedMessage(uint8_t targetPID, uint8_t categ
 // Note2: Products like SoftStep and 12Step would send multiple presets (packets) with a single preamble, see "LENGTH OF NEXT PACKET" below.
 // Multiple packets are not currently implemented in this library.
 int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type, uint8_t* ptr, uint16_t length)
-{  
+{
+    // Delegate to the header-aware overload with no header segment. With headerLen == 0 this
+    // produces byte-identical output to the original single-buffer implementation.
+    return sendSyxFormattedMessage(targetPID, category, type, nullptr, 0, ptr, length);
+}
+
+int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type,
+                                                const uint8_t* header, uint16_t headerLen,
+                                                const uint8_t* ptr, uint16_t length)
+{
 	if (!cb_tx_Send)
-    	return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION; 
+    	return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION;
 
 	building = true;  // Block timer interrupt from transmitting until complete
 
 	int returnCode = SYX_SEND_RETURN_CODE_OK;
 
+    // header + body are one contiguous CRC'd payload from the receiver's point of view
+    const uint16_t totalPayload = headerLen + length;
+
     makeSyxHeader(targetPID);
-    
+
     // begin 7/8bit encoding
     init_encode();
     init_crc();
@@ -258,13 +270,13 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
     // preamble
     encode_crc_char(category);            // message category
     encode_crc_char(type);               // message type
-    
-    encode_crc_int(length + 2 + 2); // this is the length of the payload, plus 2 for length of next packet (int), +2 for crc (int)
+
+    encode_crc_int(totalPayload + 2 + 2); // this is the length of the payload, plus 2 for length of next packet (int), +2 for crc (int)
     encode_int(crc);
-    
+
 
     // payload
-    if (length) 
+    if (totalPayload)
     {
         init_crc();
 
@@ -273,19 +285,20 @@ int16_t SysExMessageTX::sendSyxFormattedMessage(uint8_t targetPID, uint8_t categ
             flush_encode(); // EM Pro Riser bootloader expects us to flush the encoding here, most other applications do not
         }
 
-        //returnCode = cb_tx_Send(context_tx, &buffer[0], size); // transmit the preamble before encoding data
-        //clear();
-        // if (returnCode != SYX_SEND_RETURN_CODE_OK)
-        //     return returnCode;
+        // optional header segment (e.g. a slot/index byte), then the body streamed from its source
+        for (uint16_t i = 0; i < headerLen; ++i)
+        {
+            returnCode = encode_crc_char(header[i]);
+            if (returnCode != SYX_SEND_RETURN_CODE_OK) { building = false; return returnCode; }
+        }
 
         while(length--)
         {
-            returnCode = encode_crc_char(*ptr++); 
+            returnCode = encode_crc_char(*ptr++);
 
-			if (returnCode != SYX_SEND_RETURN_CODE_OK)
-				return returnCode;
+			if (returnCode != SYX_SEND_RETURN_CODE_OK) { building = false; return returnCode; }
         }
-        
+
 		// LENGTH OF NEXT PACKET
         encode_crc_int(0);  // if 0 then this is the last packet, if something other than zero, we can
                             // send additional blocks of data, ie multiple presets
@@ -501,6 +514,36 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					}
 					break; // end CORE_SX_PACKET_DATA
 				}
+				case CORE_SX_PACKET_DATA_STREAM:
+				{
+					// TAIL union: fmt.length = next-packet length (>0 means another packet follows),
+					// fmt.crc = CRC of the payload just received.
+					// TODO: multi-packet stream RX is not yet implemented.
+					uint16_t nextLen = (stream_tail_idx >= 2) ? SWAP_BYTES(stream_tail.fmt.length) : 0;
+					uint16_t rxCRC   = (stream_tail_idx >= 4) ? SWAP_BYTES(stream_tail.fmt.crc)    : 0;
+
+					if (nextLen > 0 && cb_debugPrint)
+					{
+						// TODO: implement chained multi-packet streaming (see 8051 packet_data_init re-entry).
+						// For now, close the current stream and log that we dropped the remainder.
+						char warnMsg[80];
+						snprintf(warnMsg, sizeof(warnMsg), "SYX STREAM WARN: next_len=%u — multi-packet stream RX not yet supported", nextLen);
+						cb_debugPrint(context_dp, warnMsg);
+					}
+
+					bool crcOk = (stream_tail_idx == 4) && (stream_crc == rxCRC);
+					if (!crcOk && cb_debugPrint)
+					{
+						char errMsg[80];
+						snprintf(errMsg, sizeof(errMsg), "SYX STREAM CRC FAIL - cat: %d, type: %d", preamble->category, preamble->type);
+						cb_debugPrint(context_dp, errMsg);
+					}
+
+					if (cb_rx_PacketDataStreamClose)
+						cb_rx_PacketDataStreamClose(context_rx, preamble->category, preamble->type, crcOk);
+
+					break; // end CORE_SX_PACKET_DATA_STREAM
+				}
 				case CORE_SX_RAW_DATA: // raw = unencoded
 				{
 					PACKET_PREAMBLE rawPreamble; // don't point to our buffer because our incoming message doesn't contain size or crc elements
@@ -693,10 +736,46 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 
 								//printf("[%s] CRC pass, proceed to CORE_SX_PACKET_DATA\n", name);
 								//printf("[%s] DECODED DATA: ", name);
-								// EB TODO: implement packet_data_init and packet_data_process
-								rx_state = CORE_SX_PACKET_DATA;
-								packet_data_index = preamble_index + sizeof(PACKET_PREAMBLE);
-								packet_data = &buffer[packet_data_index];
+
+								// net data bytes = preamble->length minus the 4-byte TAIL (2 length + 2 crc)
+								const uint16_t payloadDataLen = (preamble->length > 4) ? (preamble->length - 4) : 0;
+
+								// Attempt to hand the payload off to the streaming path first.
+								// Open returns true to claim it; false falls back to the buffer path.
+								// If the payload is larger than SYX_RX_BLOCK_SIZE and the app doesn't
+								// claim it, we must reject — there is no room to buffer it.
+								bool streamClaimed = false;
+								if (cb_rx_PacketDataStreamOpen)
+								{
+									streamClaimed = cb_rx_PacketDataStreamOpen(context_rx,
+									                                            preamble->category,
+									                                            preamble->type,
+									                                            payloadDataLen);
+								}
+
+								if (streamClaimed)
+								{
+									rx_state               = CORE_SX_PACKET_DATA_STREAM;
+									stream_bytes_remaining = payloadDataLen;
+									stream_payload_index   = 0;
+									stream_crc             = 0xFFFF;
+									stream_tail            = {};
+									stream_tail_idx        = 0;
+								}
+								else if (payloadDataLen + 4 > SYX_RX_BLOCK_SIZE)
+								{
+									// Payload too large to buffer and streaming was not claimed — reject.
+									if (cb_debugPrint)
+										cb_debugPrint(context_dp, "SYX: payload exceeds SYX_RX_BLOCK_SIZE, no stream handler claimed it — rejected");
+									rx_set_ignore();
+								}
+								else
+								{
+									rx_state = CORE_SX_PACKET_DATA;
+									packet_data_index = preamble_index + sizeof(PACKET_PREAMBLE);
+									packet_data = &buffer[packet_data_index];
+								}
+
 								init_crc();
 								rx_decode_count = 0; // reset the count
 								if (flushAfterPreamble == SYX_FLUSH_YES)
@@ -725,6 +804,35 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 							rx_set_ignore();
 						}
 					}
+
+					// TX does not flush between preamble and payload (SYX_FLUSH_NO), and
+					// the preamble is exactly 6 decoded bytes — leaving one slot in the
+					// 7-byte group.  That slot is filled by the first payload byte, which
+					// decode_get() yields inside the loop above and single() deposits into
+					// buffer[].  Reclaim it and route it through the streaming path so the
+					// byte count and CRC stay aligned.  The guard is a no-op for the
+					// non-streaming buffer path, the preamble-CRC-fail path, and the
+					// bootloader flush path (no 7th byte decoded in those cases).
+					if (rx_state == CORE_SX_PACKET_DATA_STREAM &&
+					    size > (size_t)preamble_index + sizeof(PACKET_PREAMBLE))
+					{
+						const uint8_t spillByte = buffer[--size];
+						if (stream_bytes_remaining > 0)
+						{
+							crc_byte(&stream_crc, spillByte);
+							if (cb_rx_PacketDataStreamProcess)
+								cb_rx_PacketDataStreamProcess(context_rx, preamble->category, preamble->type,
+								                              stream_payload_index, spillByte);
+							stream_payload_index++;
+							stream_bytes_remaining--;
+						}
+						else if (stream_tail_idx < 4)
+						{
+							if (stream_tail_idx < 2)
+								crc_byte(&stream_crc, spillByte);
+							stream_tail.raw[stream_tail_idx++] = spillByte;
+						}
+					}
 					break; // end CORE_SX_PACKET_PREAMBLE
 				}
 				case CORE_SX_PACKET_DATA:
@@ -737,6 +845,39 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 						single(sx_char); // add decoded byte to message array/vector
 					}
 					break; // end CORE_SX_PACKET_DATA
+				}
+				case CORE_SX_PACKET_DATA_STREAM:
+				{
+					// Streaming path: decoded bytes are routed directly to the application via
+					// cb_rx_PacketDataStreamProcess instead of accumulating into buffer[].
+					// The 4-byte TAIL (uint16 next-length, uint16 crc) is consumed here and
+					// used for CRC verification at F7 — it is NOT passed to the app.
+					decode_put(sx_char);
+
+					while (decode_get(&sx_char))
+					{
+						if (stream_bytes_remaining > 0)
+						{
+							// Data byte — feed CRC and hand to application.
+							crc_byte(&stream_crc, sx_char);
+							if (cb_rx_PacketDataStreamProcess)
+								cb_rx_PacketDataStreamProcess(context_rx, preamble->category, preamble->type,
+								                              stream_payload_index, sx_char);
+							stream_payload_index++;
+							stream_bytes_remaining--;
+						}
+						else if (stream_tail_idx < 4)
+						{
+							// TAIL layout: [uint16 next-length][uint16 crc].
+							// The first 2 bytes (next-length) are CRC'd by the sender;
+							// the last 2 bytes (the CRC field itself) are not.
+							if (stream_tail_idx < 2)
+								crc_byte(&stream_crc, sx_char);
+							stream_tail.raw[stream_tail_idx++] = sx_char;
+						}
+						// Any byte beyond the 4-byte TAIL before F7 is ignored.
+					}
+					break; // end CORE_SX_PACKET_DATA_STREAM
 				}
 				case CORE_SX_RAW_DATA: // unencoded 7bit data
 				{
