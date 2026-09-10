@@ -192,6 +192,23 @@ namespace
         return true;
     }
 
+    // A JSON boolean is the literal token true/false, not a digit sequence --
+    // jsonFindInt()'s strtol() parses zero characters of it (end==v) and
+    // silently fails, which is why a PE_BOOL field routed through jsonFindInt
+    // could never be Set (found on real hardware 2026-09-10: PE Set Reply
+    // still reported 200 OK -- applySetFields() doesn't fail on zero fields
+    // applied -- but the value never changed). Dedicated matcher, mirroring
+    // jsonFindInt/jsonFindFloat's own shape.
+    bool jsonFindBool(const char *body, int len, const char *key, bool *out)
+    {
+        const char *v = jsonValueAfterKey(body, len, key);
+        if (v == nullptr) return false;
+        const char *endBody = body + len;
+        if (endBody - v >= 4 && memcmp(v, "true", 4) == 0)  { *out = true;  return true; }
+        if (endBody - v >= 5 && memcmp(v, "false", 5) == 0) { *out = false; return true; }
+        return false;
+    }
+
     // ---- Declarative field engine (product-agnostic) ------------------------
     long readFieldInt(const UMP_PEField &f)
     {
@@ -272,6 +289,11 @@ namespace
             else if (f.type == PE_STR)
             {
                 if (jsonFindStr(b, len, f.name, (char *)f.ptr, f.size)) applied++;
+            }
+            else if (f.type == PE_BOOL)
+            {
+                bool v;
+                if (jsonFindBool(b, len, f.name, &v)) { *(bool *)f.ptr = v; applied++; }
             }
             else
             {
