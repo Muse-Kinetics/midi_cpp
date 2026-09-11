@@ -66,6 +66,13 @@ enum SYX_FLUSH
     SYX_FLUSH_YES
 };
 
+// See SysExMessageRX::setTrailerFormat().
+enum SYX_TRAILER
+{
+    SYX_TRAILER_NEXTLEN_AND_CRC,   // length = payload + 4; TAIL = {next length, crc}
+    SYX_TRAILER_CRC_ONLY           // length = payload;     trailer = {crc}, no chaining
+};
+
 // state machine for processing incoming sysex payloads
 enum SYX_RX_STATE
 {
@@ -232,11 +239,62 @@ class SysExMessageTX {
         void setCB_tx_Context(void* ctx) { context_tx = ctx; }
         void setCB_send(SendCallback cb) { cb_tx_Send = cb; }
         void setFlush(SYX_FLUSH flush) { flushAfterPreamble = flush; }
+        // Some products' firmware computes the packet CRC over *signed* chars, so
+        // every byte >= 0x80 sign-extends before the XOR and produces a different
+        // accumulator than the unsigned calculation. Which convention a product
+        // uses follows its firmware and whoever wrote it - it cannot be inferred
+        // from the MCU, the product family, or anything else observable here, so
+        // it has to be told to us. See crc_byte_signed() in utils_crc.h.
+        //
+        // Defaults to unsigned, so no existing product changes behaviour. Note it
+        // matters in BOTH directions: a message whose bytes all happen to be
+        // < 0x80 is identical either way, which is why a mismatch can hide for a
+        // long time and then appear the first time a payload or a length field
+        // carries a high bit.
+        void setSignedCrc(bool enabled) { signedCrc = enabled; }
+        bool getSignedCrc() const { return signedCrc; }
 
         // Flag to indicate sysex message is being built - checked by timer interrupt
         // to prevent partial transmission
         volatile bool building = false;
     
+
+        // ---- Multi-block composition -------------------------------------
+        //
+        // sendSyxFormattedMessage() above emits exactly one block and is left
+        // completely untouched: it hardcodes a next-packet length of 0, so it
+        // can never chain. These primitives are a SEPARATE path for the case it
+        // cannot express - several payloads inside one F0..F7, each with its own
+        // CRC, the way SoftStep and 12 Step receive settings and preset setlists.
+        //
+        // Deliberately not implemented in terms of one another. sendSyxFormattedMessage
+        // sets `building` on entry and clears it on exit AND on every early-return
+        // error path; splitting that across calls would change its failure
+        // semantics, not just its structure. The small duplication below buys the
+        // guarantee that existing senders are byte-for-byte unaffected.
+        //
+        // Sequence (mirrors the editor's syxtx.c, which is proven against this
+        // firmware - one preamble total, then payload+tail per block):
+        //
+        //     beginFormattedMessage(pid, cat, type, len0);
+        //     writeBlockData(block0, len0);
+        //     closeBlock(len1);        // non-zero: another block follows
+        //     writeBlockData(block1, len1);
+        //     closeBlock(0);           // zero: last block
+        //     endFormattedMessage();
+        //
+        // writeBlockData() may be called repeatedly within a block, so a large
+        // payload can be streamed from a small buffer rather than held whole.
+        //
+        // The caller owns the sequence: every begin MUST be matched by an
+        // endFormattedMessage(), including on an error return, or `building`
+        // stays set and blocks the timer interrupt from transmitting.
+        int16_t beginFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type,
+                                      uint16_t firstBlockLength);
+        int16_t writeBlockData(const uint8_t* src, uint16_t length);
+        int16_t closeBlock(uint16_t nextBlockLength);
+        int16_t endFormattedMessage();
+
         int16_t makeSyxHeader(uint8_t targetPID);
         int16_t sendSysExIDRequest();
         int16_t sendSysExIDReply();
@@ -270,6 +328,9 @@ class SysExMessageTX {
         uint8_t buffer[SYX_TX_BLOCK_SIZE];
         size_t size = 0;
         uint16_t crc = 0;
+        bool signedCrc = false;
+        // Accumulate one byte into @p crcOut using the configured convention.
+        void crcAccumulate(uint16_t* crcOut, uint8_t val) const;
         uint8_t midi_hi_bits = 0;
         uint8_t midi_hi_count = 0;
         SYX_FLUSH flushAfterPreamble = SYX_FLUSH_NO;
@@ -310,6 +371,30 @@ class SysExMessageRX {
         void rx_set_ignore();
         void setFlush(SYX_FLUSH flush) { flushAfterPreamble = flush; }
 
+        void setSignedCrc(bool enabled) { signedCrc = enabled; }
+        bool getSignedCrc() const { return signedCrc; }
+
+        // TRAILER FORMAT
+        //
+        // What the preamble's length field counts, and what follows the payload.
+        //
+        // The modern KMI form is payload + 4: a 4-byte TAIL of {next-packet
+        // length, payload CRC} follows the data, and a non-zero next-length
+        // chains another block inside the same F0..F7.
+        //
+        // Some firmware instead sends the payload length alone, followed by a
+        // bare 2-byte CRC with no next-length field and so no chaining. That is
+        // a property of the sending firmware, not of the architecture or the
+        // product family - SoftStep's own sendSyxFormattedMessage() is one such
+        // sender (MIDI_sysex_tx.c), while its RECEIVER expects the modern form,
+        // so a single product can differ by direction.
+        //
+        // Getting this wrong desynchronises the reader by 6 bytes: it CRCs the
+        // wrong extent, fails, and leaves the parser mid-stream so the NEXT
+        // packet reports a bogus preamble too. Defaults to the modern form.
+        void setTrailerFormat(SYX_TRAILER format) { trailerFormat = format; }
+        SYX_TRAILER getTrailerFormat() const { return trailerFormat; }
+
         void single(uint8_t byte);
         void array(const uint8_t* bytes, size_t length);
 
@@ -344,6 +429,10 @@ class SysExMessageRX {
     
         CORE_SX_DECODE core_sx_decode;
         uint16_t crc;
+        bool signedCrc = false;
+        SYX_TRAILER trailerFormat = SYX_TRAILER_NEXTLEN_AND_CRC;
+        // Accumulate one byte into @p crcOut using the configured convention.
+        void crcAccumulate(uint16_t* crcOut, uint8_t val) const;
     
         uint8_t preamble_index;
         PACKET_PREAMBLE* preamble;

@@ -87,6 +87,22 @@ int16_t SysExMessageTX::array(const uint8_t* bytes, size_t length)
 // functions below encode 8bits to 7 bits, with/without crc
 // **************************************
 
+void SysExMessageTX::crcAccumulate(uint16_t* crcOut, uint8_t val) const
+{
+    if (signedCrc)
+        crc_byte_signed(crcOut, val);
+    else
+        crc_byte(crcOut, val);
+}
+
+void SysExMessageRX::crcAccumulate(uint16_t* crcOut, uint8_t val) const
+{
+    if (signedCrc)
+        crc_byte_signed(crcOut, val);
+    else
+        crc_byte(crcOut, val);
+}
+
 void SysExMessageTX::init_crc()
 {
     crc = 0xFFFF;
@@ -114,7 +130,7 @@ int16_t SysExMessageTX::encode_char(uint8_t val)
 
 int16_t SysExMessageTX::encode_crc_char(uint8_t val)
 {
-    crc_byte(&crc, val);
+    crcAccumulate(&crc, val);
     return encode_char(val);
 }
 
@@ -232,6 +248,85 @@ int16_t SysExMessageTX::sendSyxUnEncodedMessage(uint8_t targetPID, uint8_t categ
 		return SYX_SEND_RETURN_CODE_ERROR;
 	}
 	return returnCode;
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Multi-block composition. See the declarations in MIDI_sysex.hpp.
+//
+// Nothing here is called by sendSyxFormattedMessage(), and it calls nothing in
+// it - the two paths share only the lower-level encode_* helpers, so the CRC,
+// 7/8-bit packing and flush behaviour stay common while the sequencing differs.
+// ---------------------------------------------------------------------------
+
+int16_t SysExMessageTX::beginFormattedMessage(uint8_t targetPID, uint8_t category, uint8_t type,
+                                              uint16_t firstBlockLength)
+{
+    if (!cb_tx_Send)
+        return SYX_SEND_RETURN_CODE_NO_SEND_FUNCTION;
+
+    building = true;   // cleared by endFormattedMessage()
+
+    makeSyxHeader(targetPID);
+
+    init_encode();
+    init_crc();
+
+    // Preamble: category, type, this block's length including its 4-byte TAIL,
+    // then the preamble's own CRC. Same layout sendSyxFormattedMessage writes.
+    encode_crc_char(category);
+    encode_crc_char(type);
+    encode_crc_int((uint16_t)(firstBlockLength + 2 + 2));
+    encode_int(crc);
+
+    // Each block CRCs only its own payload, so restart the accumulator here.
+    init_crc();
+
+    if (flushAfterPreamble == SYX_FLUSH_YES)
+        flush_encode();
+
+    return SYX_SEND_RETURN_CODE_OK;
+}
+
+int16_t SysExMessageTX::writeBlockData(const uint8_t* src, uint16_t length)
+{
+    if (src == 0)
+        return SYX_SEND_RETURN_CODE_ERROR;
+
+    int16_t returnCode = SYX_SEND_RETURN_CODE_OK;
+    while (length--)
+    {
+        returnCode = encode_crc_char(*src++);
+        if (returnCode != SYX_SEND_RETURN_CODE_OK)
+            return returnCode;   // caller still owes endFormattedMessage()
+    }
+
+    return SYX_SEND_RETURN_CODE_OK;
+}
+
+int16_t SysExMessageTX::closeBlock(uint16_t nextBlockLength)
+{
+    // TAIL: length of the NEXT block (0 = this was the last), then this block's
+    // payload CRC. A non-zero length is sent including its own TAIL, matching
+    // the editor's midi_sx_packet_data_close() and what the 8051 receiver's
+    // packet_data_init() re-entry expects.
+    encode_crc_int(nextBlockLength ? (uint16_t)(nextBlockLength + 2 + 2) : 0);
+    encode_int(crc);
+
+    if (nextBlockLength)
+        init_crc();   // ready for the next block's payload
+
+    return SYX_SEND_RETURN_CODE_OK;
+}
+
+int16_t SysExMessageTX::endFormattedMessage()
+{
+    flush_encode();
+    single(MIDI_SX_STOP);   // MIDI_SX_STOP triggers the send
+
+    building = false;
+    return SYX_SEND_RETURN_CODE_OK;
 }
 
 
@@ -422,7 +517,7 @@ bool SysExMessageRX::testDecodedCRC(uint16_t startIndex, uint16_t length)
     // Calculate CRC for the data chunk
     uint16_t calculatedCRC = 0xFFFF; // Initialize CRC
     for (uint16_t i = 0; i < length; ++i) {
-        crc_byte(&calculatedCRC, dataChunk[i]);
+        crcAccumulate(&calculatedCRC, dataChunk[i]);
     }
 
 	// Extract the expected CRC from the message
@@ -494,8 +589,17 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 				{
 					//printf("\n"); // we just printed the packet data so add a line break
 					//printf("[%s] ...PACKET_DATA\n", name);
-					if (preamble->length > 4 && // 4 = length and crc only, no data
-						 testDecodedCRC(packet_data_index, preamble->length - 2) == false) // verify the CRC of the data, don't crc the crc (-2)
+					// Modern: length covers payload + 4-byte TAIL, and the CRC sits in
+					// the last 2 of those, so CRC the first length-2 bytes.
+					// Legacy (SYX_TRAILER_CRC_ONLY): length IS the payload, followed by
+					// a bare 2-byte CRC, so CRC exactly length bytes.
+					const bool legacyTrailer = (trailerFormat == SYX_TRAILER_CRC_ONLY);
+					const uint16_t crcExtent  = legacyTrailer ? preamble->length
+					                                          : (uint16_t)(preamble->length - 2);
+					const uint16_t minLength  = legacyTrailer ? 1 : 4;
+
+					if (preamble->length >= minLength &&
+						 testDecodedCRC(packet_data_index, crcExtent) == false) // verify the CRC of the data
 					{
 						uint8_t category = preamble->category;
 						uint8_t type = preamble->type;
@@ -508,7 +612,10 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 					else
 					{
 						//printf("[%s] CRC pass\n", name);
-						preamble->length -= 4; // remove the crc and length bytes from the length
+						// Modern only: strip the TAIL so the callback sees the payload
+						// length. Legacy length already IS the payload length.
+						if (!legacyTrailer)
+							preamble->length -= 4;
 						if (cb_rx_PacketData)
 							cb_rx_PacketData(context_rx, preamble, packet_data); // child classes (riser, computer, soundcard etc) determine how this is handled
 					}
@@ -740,7 +847,13 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 								//printf("[%s] DECODED DATA: ", name);
 
 								// net data bytes = preamble->length minus the 4-byte TAIL (2 length + 2 crc)
-								const uint16_t payloadDataLen = (preamble->length > 4) ? (preamble->length - 4) : 0;
+								// Legacy senders put the payload length in the field directly,
+								// with only a 2-byte CRC after it; modern ones include the
+								// 4-byte TAIL in the count.
+								const uint16_t payloadDataLen =
+									(trailerFormat == SYX_TRAILER_CRC_ONLY)
+										? preamble->length
+										: ((preamble->length > 4) ? (preamble->length - 4) : 0);
 
 								// Attempt to hand the payload off to the streaming path first.
 								// Open returns true to claim it; false falls back to the buffer path.
@@ -826,7 +939,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 						const uint8_t spillByte = buffer[--size];
 						if (stream_bytes_remaining > 0)
 						{
-							crc_byte(&stream_crc, spillByte);
+							crcAccumulate(&stream_crc, spillByte);
 							if (cb_rx_PacketDataStreamProcess)
 								cb_rx_PacketDataStreamProcess(context_rx, preamble->category, preamble->type,
 								                              stream_payload_index, spillByte);
@@ -836,7 +949,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 						else if (stream_tail_idx < 4)
 						{
 							if (stream_tail_idx < 2)
-								crc_byte(&stream_crc, spillByte);
+								crcAccumulate(&stream_crc, spillByte);
 							stream_tail.raw[stream_tail_idx++] = spillByte;
 						}
 					}
@@ -868,7 +981,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 						if (stream_bytes_remaining > 0)
 						{
 							// Data byte — feed CRC and hand to application.
-							crc_byte(&stream_crc, sx_char);
+							crcAccumulate(&stream_crc, sx_char);
 							if (cb_rx_PacketDataStreamProcess)
 								cb_rx_PacketDataStreamProcess(context_rx, preamble->category, preamble->type,
 								                              stream_payload_index, sx_char);
@@ -881,7 +994,7 @@ void SysExMessageRX::sx_process(uint8_t *msg, uint16_t length)
 							// The first 2 bytes (next-length) are CRC'd by the sender;
 							// the last 2 bytes (the CRC field itself) are not.
 							if (stream_tail_idx < 2)
-								crc_byte(&stream_crc, sx_char);
+								crcAccumulate(&stream_crc, sx_char);
 							stream_tail.raw[stream_tail_idx++] = sx_char;
 						}
 						// Any byte beyond the 4-byte TAIL before F7 is ignored.
