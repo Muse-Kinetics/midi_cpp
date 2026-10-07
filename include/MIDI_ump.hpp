@@ -356,6 +356,11 @@ public:
     /// UMP; the same packer MIDI-CI uses internally.
     void sendSysex7(uint8_t group, const uint8_t *body, uint16_t len);
 
+    /// Free space in the TX accumulator (bytes). Queueing more than this drops the
+    /// excess words silently, which can cut a SysEx7 message short: a producer that
+    /// streams (e.g. bulk telemetry) checks this before sending a whole message.
+    uint16_t txFreeBytes() const { return (uint16_t)(TX_BUF_BYTES - txLen_); }
+
     /// Push a Property Exchange subscription notification for `resourceName` to every
     /// current subscriber (a device-initiated "full" update carrying the resource's
     /// present value). Call this whenever the resource's backing data changes by ANY
