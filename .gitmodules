@@ -1,3 +1,4 @@
 [submodule "examples/rtmidi"]
 	path = examples/rtmidi
-	url = https://github.com/thestk/rtmidi.git
+	url = https://github.com/Muse-Kinetics/rtmidi.git
+	branch = sysex-send-flowcontrol

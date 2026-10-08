@@ -49,5 +49,16 @@
 // Library Features and Functionality
 // ************************************
 
+// Opt-in features below cost RAM/flash per SysExMessageRX/UMP_Endpoint
+// instance, multiplied by however many your product has. Leave undefined
+// unless you call the feature's API.
+
+// MIDI_CPP_ENABLE_SYSEX_STREAM_RX -- enables setCB_rx_PacketDataStream{Open,
+// Process,Close}() on SysExMessageRX: streams an inbound SysEx payload
+// byte-by-byte instead of buffering it in SYX_RX_BLOCK_SIZE, for payloads
+// larger than that buffer. Cost: +24 B RAM per SysExMessageRX instance
+// (3 callback pointers + 5 stream-state fields), always, whether or not
+// you set the callbacks.
+// #define MIDI_CPP_ENABLE_SYSEX_STREAM_RX
 
 #endif/* MIDI_CPP_CONFIG_H */
